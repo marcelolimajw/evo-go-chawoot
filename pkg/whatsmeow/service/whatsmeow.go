@@ -33,6 +33,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
+	"github.com/EvolutionAPI/evolution-go/internal/chatwoot"
 	"github.com/EvolutionAPI/evolution-go/pkg/config"
 	producer_interfaces "github.com/EvolutionAPI/evolution-go/pkg/events/interfaces"
 	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
@@ -1339,18 +1340,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						webpReader := bytes.NewReader(data)
 						img, err := webp.Decode(webpReader)
 						if err != nil {
-							mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to decode webp image: %v", mycli.userID, err)
-							return
+							mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to decode webp image (possibly animated): %v", mycli.userID, err)
+						} else {
+							var pngBuffer bytes.Buffer
+							err = png.Encode(&pngBuffer, img)
+							if err != nil {
+								mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to encode png image: %v", mycli.userID, err)
+							} else {
+								data = pngBuffer.Bytes()
+							}
 						}
-
-						var pngBuffer bytes.Buffer
-						err = png.Encode(&pngBuffer, img)
-						if err != nil {
-							mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to encode png image: %v", mycli.userID, err)
-							return
-						}
-
-						data = pngBuffer.Bytes()
 					}
 					// Handle associated child media messages
 				} else if associatedImg != nil {
@@ -1382,18 +1381,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					webpReader := bytes.NewReader(data)
 					img, err := webp.Decode(webpReader)
 					if err != nil {
-						mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to decode webp image: %v", mycli.userID, err)
-						return
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to decode webp image (possibly animated): %v", mycli.userID, err)
+					} else {
+						var pngBuffer bytes.Buffer
+						err = png.Encode(&pngBuffer, img)
+						if err != nil {
+							mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to encode png image: %v", mycli.userID, err)
+						} else {
+							data = pngBuffer.Bytes()
+						}
 					}
-
-					var pngBuffer bytes.Buffer
-					err = png.Encode(&pngBuffer, img)
-					if err != nil {
-						mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to encode png image: %v", mycli.userID, err)
-						return
-					}
-
-					data = pngBuffer.Bytes()
 				}
 
 				downloadDuration := time.Since(downloadStart)
@@ -1498,6 +1495,15 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 
 		postMap["data"] = dataMap
+
+		// Chatwoot integration
+		go func() {
+			cwService := chatwoot.NewService(mycli.config)
+			err := cwService.HandleWhatsAppMessage(evt, mycli.Instance.Name, mycli.WAClient)
+			if err != nil {
+				mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Chatwoot integration error: %v", mycli.userID, err)
+			}
+		}()
 
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] ===== MESSAGE PROCESSING COMPLETED ===== ID: %s, From: %s, Type: %s, Webhook: %v", mycli.userID, evt.Info.ID, evt.Info.Chat.String(), evt.Info.Type, doWebhook)
 	case *events.Receipt:

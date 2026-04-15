@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chatwoot Manager — Evolution GO</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --surface2:   #22263a;
+      --border:     #2e3248;
+      --accent:     #25d366;
+      --accent2:    #1ea952;
+      --text:       #e8eaf0;
+      --muted:      #8a90a8;
+      --danger:     #e05c5c;
+      --radius:     12px;
+      --shadow:     0 4px 24px rgba(0,0,0,.45);
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 220px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      flex-shrink: 0;
+    }
+    .sidebar-logo {
+      padding: 0 20px 28px;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -.3px;
+    }
+    .sidebar-logo span { color: var(--text); }
+    .sidebar-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 20px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all .18s;
+      text-decoration: none;
+      border-left: 3px solid transparent;
+    }
+    .sidebar-item:hover { color: var(--text); background: var(--surface2); }
+    .sidebar-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(37,211,102,.07); }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 32px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .topbar h1 { font-size: 20px; font-weight: 600; }
+    .topbar small { color: var(--muted); font-size: 13px; display: block; margin-top: 2px; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all .18s;
+    }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-primary:hover { background: var(--accent2); }
+    .btn-danger  { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    .btn-danger:hover  { background: var(--danger); color: #fff; }
+    .btn-ghost   { background: var(--surface2); color: var(--text); }
+    .btn-ghost:hover   { background: var(--border); }
+
+    .content { padding: 32px; overflow-y: auto; flex: 1; }
+
+    /* ── Cards de instância ── */
+    .instances-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 20px;
+    }
+    .instance-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px;
+      transition: border-color .2s;
+    }
+    .instance-card:hover { border-color: var(--accent); }
+    .instance-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+    }
+    .instance-name { font-size: 16px; font-weight: 600; }
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+    .badge-ok { background: rgba(37,211,102,.15); color: var(--accent); }
+    .badge-warn { background: rgba(255,190,0,.15); color: #ffbe00; }
+    .instance-detail { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    .instance-detail span { color: var(--text); font-weight: 500; word-break: break-all; }
+    .instance-actions { display: flex; gap: 8px; margin-top: 18px; }
+
+    /* ── Modal ── */
+    .overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.65);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      width: 100%;
+      max-width: 520px;
+      padding: 32px;
+      animation: slideIn .22s ease;
+    }
+    @keyframes slideIn {
+      from { transform: translateY(-20px); opacity: 0; }
+      to   { transform: translateY(0);     opacity: 1; }
+    }
+    .modal-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+    .modal-sub   { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+    .form-group  { margin-bottom: 18px; }
+    .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 7px; color: var(--muted); }
+    .form-group input {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      transition: border-color .18s;
+      outline: none;
+    }
+    .form-group input:focus { border-color: var(--accent); }
+    .form-group input::placeholder { color: var(--muted); }
+    .form-divider { border-top: 1px solid var(--border); margin: 22px 0; padding-top: 4px; }
+    .form-divider-label { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .8px; text-transform: uppercase; margin-bottom: 18px; }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
+
+    /* ── Toast ── */
+    .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 200; display: flex; flex-direction: column; gap: 10px; }
+    .toast {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 18px;
+      font-size: 14px;
+      color: var(--text);
+      box-shadow: var(--shadow);
+      animation: toastIn .25s ease;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .toast.success { border-left: 4px solid var(--accent); }
+    .toast.error   { border-left: 4px solid var(--danger); }
+    @keyframes toastIn { from { transform: translateX(40px); opacity:0 } to { transform: translateX(0); opacity:1 } }
+
+    .empty-state { text-align: center; padding: 80px 20px; color: var(--muted); }
+    .empty-state svg { margin-bottom: 16px; opacity: .4; }
+    .empty-state p { font-size: 15px; }
+
+    .loading { opacity: .5; pointer-events: none; }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      margin: 60px auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .webhook-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-family: monospace;
+      color: var(--accent);
+      word-break: break-all;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-logo">Evolution <span>GO</span></div>
+  <a class="sidebar-item" href="/manager">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    Dashboard
+  </a>
+  <a class="sidebar-item" href="/manager/instances">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+    Instâncias
+  </a>
+  <a class="sidebar-item active" href="/chatwoot/ui">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    Chatwoot
+  </a>
+</aside>
+
+<!-- Main -->
+<main class="main">
+  <div class="topbar">
+    <div>
+      <h1>Integração Chatwoot</h1>
+      <small>Configure as contas do Chatwoot para cada instância WhatsApp</small>
+    </div>
+    <button class="btn btn-primary" onclick="openModal()">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      Adicionar Instância
+    </button>
+  </div>
+
+  <div class="content">
+    <div id="list-container"><div class="spinner"></div></div>
+  </div>
+</main>
+
+<!-- Modal -->
+<div class="overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-title" id="modal-title">Adicionar Integração Chatwoot</div>
+    <div class="modal-sub">Configure o Chatwoot para uma instância WhatsApp</div>
+
+    <div class="form-group">
+      <label>Nome da Instância (WhatsApp)</label>
+      <input type="text" id="f-instance" placeholder="ex: telfo" />
+    </div>
+
+    <div class="form-divider"><div class="form-divider-label">Configuração do Chatwoot</div></div>
+
+    <div class="form-group">
+      <label>URL do Chatwoot</label>
+      <input type="text" id="f-url" placeholder="https://atendimento.suaempresa.com.br" />
+    </div>
+    <div class="form-group">
+      <label>Token de Acesso (API)</label>
+      <input type="text" id="f-token" placeholder="Cole o User Access Token aqui" />
+    </div>
+    <div class="form-group">
+      <label>Account ID</label>
+      <input type="text" id="f-account" placeholder="ex: 2" />
+    </div>
+    <div class="form-group">
+      <label>Inbox ID</label>
+      <input type="text" id="f-inbox" placeholder="ex: 6" />
+    </div>
+    <div class="form-group">
+      <label>Habilitar Assinatura do Agente</label>
+      <select id="f-signature" style="width:100%;padding:10px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;font-family:inherit;outline:none;">
+        <option value="false">Não</option>
+        <option value="true">Sim</option>
+      </select>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveInstance()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-container" id="toasts"></div>
+
+<script>
+  const API_KEY = prompt('Digite sua API Key para continuar:') || '';
+  const HEADERS = { 'Content-Type': 'application/json', 'apikey': API_KEY };
+
+  // ── Carregar instâncias ──
+  async function loadInstances() {
+    const container = document.getElementById('list-container');
+    try {
+      const r = await fetch('/chatwoot/manager', { headers: HEADERS });
+      const data = await r.json();
+      const entries = Object.entries(data || {});
+
+      if (!entries.length) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <p>Nenhuma integração configurada ainda.<br>Clique em <strong>Adicionar Instância</strong> para começar.</p>
+          </div>`;
+        return;
+      }
+
+      const baseUrl = window.location.origin;
+      container.innerHTML = `<div class="instances-grid">${entries.map(([name, cfg]) => `
+        <div class="instance-card">
+          <div class="instance-header">
+            <div class="instance-name">${name}</div>
+            <span class="badge badge-ok">Configurado</span>
+          </div>
+          <div class="instance-detail">🌐 URL: <span>${cfg.url || '—'}</span></div>
+          <div class="instance-detail">🏢 Account: <span>${cfg.account_id || '—'}</span></div>
+          <div class="instance-detail">📥 Inbox: <span>${cfg.inbox_id || '—'}</span></div>
+          <div class="instance-detail">✍️ Assinatura: <span>${cfg.enable_signature ? 'Sim' : 'Não'}</span></div>
+          <div class="instance-detail" style="margin-top:12px;">🔗 Webhook URL do Chatwoot:</div>
+          <div class="webhook-box">${baseUrl}/chatwoot/webhook?instance=${name}</div>
+          <div class="instance-actions">
+            <button class="btn btn-ghost" style="flex:1" onclick="editInstance('${name}', ${JSON.stringify(cfg).replace(/"/g,'&quot;')})">✏️ Editar</button>
+            <button class="btn btn-danger" onclick="deleteInstance('${name}')">Remover</button>
+          </div>
+        </div>`).join('')}
+      </div>`;
+    } catch (e) {
+      container.innerHTML = `<div class="empty-state"><p>❌ Erro ao carregar. Verifique sua API Key.</p></div>`;
+    }
+  }
+
+  // ── Modal ──
+  let editingInstance = null;
+
+  function openModal(name = null, cfg = null) {
+    editingInstance = name;
+    document.getElementById('modal-title').textContent = name ? `Editar: ${name}` : 'Adicionar Integração Chatwoot';
+    document.getElementById('f-instance').value = name || '';
+    document.getElementById('f-instance').disabled = !!name;
+    document.getElementById('f-url').value = cfg?.url || '';
+    document.getElementById('f-token').value = cfg?.token || '';
+    document.getElementById('f-account').value = cfg?.account_id || '';
+    document.getElementById('f-inbox').value = cfg?.inbox_id || '';
+    document.getElementById('f-signature').value = cfg?.enable_signature ? 'true' : 'false';
+    document.getElementById('modal-overlay').classList.add('open');
+  }
+
+  function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+    editingInstance = null;
+  }
+
+  function editInstance(name, cfg) {
+    openModal(name, cfg);
+  }
+
+  // ── Salvar ──
+  async function saveInstance() {
+    const instance = editingInstance || document.getElementById('f-instance').value.trim();
+    const body = {
+      url:              document.getElementById('f-url').value.trim(),
+      token:            document.getElementById('f-token').value.trim(),
+      account_id:       document.getElementById('f-account').value.trim(),
+      inbox_id:         document.getElementById('f-inbox').value.trim(),
+      enable_signature: document.getElementById('f-signature').value === 'true',
+    };
+
+    if (!instance || !body.url || !body.token || !body.account_id || !body.inbox_id) {
+      toast('Preencha todos os campos obrigatórios.', 'error'); return;
+    }
+
+    try {
+      const r = await fetch(`/chatwoot/manager?instance=${instance}`, {
+        method: 'POST', headers: HEADERS, body: JSON.stringify(body)
+      });
+      if (!r.ok) throw new Error(await r.text());
+      toast(`✅ Instância "${instance}" salva com sucesso!`, 'success');
+      closeModal();
+      loadInstances();
+    } catch (e) {
+      toast('❌ Erro ao salvar: ' + e.message, 'error');
+    }
+  }
+
+  // ── Deletar ──
+  async function deleteInstance(name) {
+    if (!confirm(`Remover a integração "${name}"? Esta ação não pode ser desfeita.`)) return;
+    try {
+      const r = await fetch(`/chatwoot/manager/${name}`, { method: 'DELETE', headers: HEADERS });
+      if (!r.ok) throw new Error(await r.text());
+      toast(`🗑️ Instância "${name}" removida.`, 'success');
+      loadInstances();
+    } catch (e) {
+      toast('❌ Erro ao remover: ' + e.message, 'error');
+    }
+  }
+
+  // ── Toast ──
+  function toast(msg, type = 'success') {
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    document.getElementById('toasts').appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+
+  // Fechar modal ao clicar fora
+  document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal-overlay')) closeModal();
+  });
+
+  loadInstances();
+</script>
+</body>
+</html>

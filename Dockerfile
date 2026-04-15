@@ -31,4 +31,7 @@ COPY --from=build /build/VERSION ./VERSION
 
 ENV TZ=America/Sao_Paulo
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/server/ok || exit 1
+
 ENTRYPOINT ["/app/server"]

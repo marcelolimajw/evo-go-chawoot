@@ -2,9 +2,12 @@ version: '3.8'
 
 services:
   evolution-go:
-    image: evoapicloud/evolution-go:latest
+    image: marcelolimajw/evolution-go-chatwoot:latest
     container_name: evolution-go
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "4000:4000"
     environment:
@@ -13,7 +16,7 @@ services:
       CLIENT_NAME: "evolution"
 
       # Segurança (OBRIGATÓRIO)
-      GLOBAL_API_KEY: "sua-chave-api-segura-aqui"
+      GLOBAL_API_KEY: "0417bf43b0a8969bd6685bcb49d783df"
 
       # Banco de Dados PostgreSQL (RECOMENDADO)
       POSTGRES_AUTH_DB: "postgresql://postgres:postgres@postgres:5432/evogo_auth?sslmode=disable"
@@ -59,11 +62,24 @@ services:
       # QR Code
       QRCODE_MAX_COUNT: "5"
 
+      # Chatwoot Integration
+      CHATWOOT_URL: "https://atendimento.kortexia.com.br"
+      CHATWOOT_TOKEN: "3ztpi1WvRNnmkYZYCk6jFJvY"
+      CHATWOOT_ACCOUNT_ID: "2"
+      CHATWOOT_INBOX_ID: "6"
+
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4000/server/ok" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
     volumes:
       - evolution_data:/app/dbdata
       - evolution_logs:/app/logs
     networks:
-      - evolution_network
+      - minha_rede
     depends_on:
       - postgres
 
@@ -76,12 +92,12 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     networks:
-      - evolution_network
+      - minha_rede
 
 volumes:
   evolution_data:
@@ -92,5 +108,6 @@ volumes:
     driver: local
 
 networks:
-  evolution_network:
-    driver: bridge
+  minha_rede:
+    name: minha_rede
+    external: true

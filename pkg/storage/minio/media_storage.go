@@ -153,3 +153,30 @@ func (m *MinioMediaStorage) GetURL(ctx context.Context, fileName string) (string
 
 	return presignedURL.String(), nil
 }
+func (m *MinioMediaStorage) DeleteByPrefix(ctx context.Context, prefix string) error {
+	// Ensure the prefix includes the main folder
+	fullPrefix := fmt.Sprintf("evolution-go-medias/%s", prefix)
+
+	objectsCh := make(chan minio.ObjectInfo)
+
+	// List objects with prefix
+	go func() {
+		defer close(objectsCh)
+		for object := range m.client.ListObjects(ctx, m.bucketName, minio.ListObjectsOptions{Prefix: fullPrefix, Recursive: true}) {
+			if object.Err != nil {
+				return
+			}
+			objectsCh <- object
+		}
+	}()
+
+	// Delete found objects
+	errorCh := m.client.RemoveObjects(ctx, m.bucketName, objectsCh, minio.RemoveObjectsOptions{})
+	for err := range errorCh {
+		if err.Err != nil {
+			return fmt.Errorf("failed to delete object %s: %w", err.ObjectName, err.Err)
+		}
+	}
+
+	return nil
+}

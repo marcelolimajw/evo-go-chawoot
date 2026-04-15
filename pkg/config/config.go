@@ -68,6 +68,10 @@ type Config struct {
 	LogDirectory  string
 	LogCompress   bool
 
+	ChatwootUrl       string
+	ChatwootToken     string
+	ChatwootAccountId string
+	ChatwootInboxId   string
 }
 
 // EnsureDBExists connects to postgres (without the target database) and creates it if it doesn't exist.
@@ -383,6 +387,10 @@ func Load() *Config {
 		LogMaxAge:            logMaxAge,
 		LogDirectory:         logDirectory,
 		LogCompress:          logCompress,
+		ChatwootUrl:          os.Getenv(config_env.CHATWOOT_URL),
+		ChatwootToken:        os.Getenv(config_env.CHATWOOT_TOKEN),
+		ChatwootAccountId:    os.Getenv(config_env.CHATWOOT_ACCOUNT_ID),
+		ChatwootInboxId:      os.Getenv(config_env.CHATWOOT_INBOX_ID),
 	}
 
 	minioEnabled := os.Getenv(config_env.MINIO_ENABLED) == "true"

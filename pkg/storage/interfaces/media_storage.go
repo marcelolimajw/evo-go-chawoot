@@ -12,4 +12,7 @@ type MediaStorage interface {
 
 	// GetURL returns the public URL for accessing the media
 	GetURL(ctx context.Context, fileName string) (string, error)
+
+	// DeleteByPrefix removes all objects matching the prefix
+	DeleteByPrefix(ctx context.Context, prefix string) error
 }
