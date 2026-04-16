@@ -233,7 +233,7 @@
 <body>
 
 <!-- Sidebar -->
-<aside class="sidebar">
+<aside class="sidebar" style="display:none" id="sidebar">
   <div class="sidebar-logo">Evolution <span>GO</span></div>
   <a class="sidebar-item" href="/manager">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
@@ -250,7 +250,7 @@
 </aside>
 
 <!-- Main -->
-<main class="main">
+<main class="main" style="display:none" id="main-content">
   <div class="topbar">
     <div>
       <h1>Integração Chatwoot</h1>
@@ -266,6 +266,14 @@
     <div id="list-container"><div class="spinner"></div></div>
   </div>
 </main>
+
+<!-- Auth Block -->
+<div id="auth-guard" style="flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;">
+  <div>
+    <div class="spinner"></div>
+    <p style="color: var(--muted)">Aguardando autenticação...</p>
+  </div>
+</div>
 
 <!-- Modal -->
 <div class="overlay" id="modal-overlay">
@@ -315,8 +323,41 @@
 <div class="toast-container" id="toasts"></div>
 
 <script>
-  const API_KEY = prompt('Digite sua API Key para continuar:') || '';
-  const HEADERS = { 'Content-Type': 'application/json', 'apikey': API_KEY };
+  let API_KEY = sessionStorage.getItem('evogo_apikey');
+  let HEADERS = null;
+
+  async function checkAuth() {
+    if (!API_KEY) {
+      API_KEY = prompt('Digite sua API Key para continuar:');
+      if (!API_KEY) {
+        document.getElementById('auth-guard').innerHTML = '<h1>❌ Acesso Negado</h1><p style="margin-top:10px; color:var(--muted)">É necessário uma API Key válida para acessar este painel.</p><button class="btn btn-primary" style="margin-top:20px" onclick="location.reload()">Tentar novamente</button>';
+        return;
+      }
+      sessionStorage.setItem('evogo_apikey', API_KEY);
+    }
+
+    HEADERS = { 'Content-Type': 'application/json', 'apikey': API_KEY };
+
+    try {
+      const r = await fetch('/chatwoot/manager', { headers: HEADERS });
+      if (r.status === 401 || r.status === 403) {
+        sessionStorage.removeItem('evogo_apikey');
+        alert('API Key inválida ou expirada.');
+        location.reload();
+        return;
+      }
+      
+      // Liberar UI
+      document.getElementById('auth-guard').style.display = 'none';
+      document.getElementById('sidebar').style.display = 'flex';
+      document.getElementById('main-content').style.display = 'flex';
+      
+      loadInstances();
+    } catch (e) {
+      console.error(e);
+      document.getElementById('auth-guard').innerHTML = '❌ Erro de conexão com o servidor.';
+    }
+  }
 
   // ── Carregar instâncias ──
   async function loadInstances() {
@@ -439,7 +480,7 @@
     if (e.target === document.getElementById('modal-overlay')) closeModal();
   });
 
-  loadInstances();
+  checkAuth();
 </script>
 </body>
 </html>

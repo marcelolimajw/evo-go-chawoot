@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
-	"time"
 
 	storage_interfaces "github.com/EvolutionAPI/evolution-go/pkg/storage/interfaces"
 	"github.com/minio/minio-go/v7"
@@ -17,22 +15,6 @@ type MinioMediaStorage struct {
 	client     *minio.Client
 	bucketName string
 	baseURL    string
-}
-
-func setBucketPolicy(client *minio.Client, bucketName string) error {
-	policy := `{
-		"Version": "2012-10-17",
-		"Statement": [
-			{
-				"Effect": "Allow",
-				"Principal": "*",
-				"Action": ["s3:GetObject"],
-				"Resource": ["arn:aws:s3:::` + bucketName + `/*"]
-			}
-		]
-	}`
-
-	return client.SetBucketPolicy(context.Background(), bucketName, policy)
 }
 
 // generateFilePath creates a simple media folder structure
@@ -71,14 +53,6 @@ func NewMinioMediaStorage(
 		return nil, fmt.Errorf("failed to create MinIO client: %w", err)
 	}
 
-	// Try to set bucket policy to allow public access (optional for some providers)
-	err = setBucketPolicy(client, bucketName)
-	if err != nil {
-		// Some providers (like Backblaze B2) don't support SetBucketPolicy
-		// Log warning but continue - files can still be accessed via presigned URLs
-		fmt.Printf("Warning: Failed to set bucket policy (provider may not support it): %v\n", err)
-	}
-
 	baseURL := fmt.Sprintf("https://%s/%s", endpoint, bucketName)
 	if !useSSL {
 		baseURL = fmt.Sprintf("http://%s/%s", endpoint, bucketName)
@@ -103,16 +77,11 @@ func (m *MinioMediaStorage) Store(ctx context.Context, data []byte, fileName str
 		return "", fmt.Errorf("failed to store object: %w", err)
 	}
 
-	// Gerando URL assinada com validade de 7 dias
-	reqParams := make(url.Values)
-	presignedURL, err := m.client.PresignedGetObject(ctx, m.bucketName, filePath, time.Hour*24*7, reqParams)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate presigned URL: %w", err)
-	}
+	// Construindo URL permanente (pública)
+	permanentURL := fmt.Sprintf("%s/%s", m.baseURL, filePath)
+	fmt.Println(permanentURL)
 
-	fmt.Println(presignedURL.String())
-
-	return presignedURL.String(), nil
+	return permanentURL, nil
 }
 
 func (m *MinioMediaStorage) Delete(ctx context.Context, fileName string) error {
@@ -142,17 +111,13 @@ func (m *MinioMediaStorage) GetURL(ctx context.Context, fileName string) (string
 		return "", fmt.Errorf("failed to get object stats: %w", err)
 	}
 
-	// Gerando URL assinada com validade de 7 dias
-	reqParams := make(url.Values)
-	presignedURL, err := m.client.PresignedGetObject(ctx, m.bucketName, filePath, time.Hour*24*7, reqParams)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate presigned URL: %w", err)
-	}
+	// Construindo URL permanente (pública)
+	permanentURL := fmt.Sprintf("%s/%s", m.baseURL, filePath)
+	fmt.Println(permanentURL)
 
-	fmt.Println(presignedURL.String())
-
-	return presignedURL.String(), nil
+	return permanentURL, nil
 }
+
 func (m *MinioMediaStorage) DeleteByPrefix(ctx context.Context, prefix string) error {
 	// Ensure the prefix includes the main folder
 	fullPrefix := fmt.Sprintf("evolution-go-medias/%s", prefix)

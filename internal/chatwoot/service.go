@@ -530,7 +530,50 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	}
 
 	if isMedia && err == nil && fileBytes != nil {
-		cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes)
+		if s.MediaStorage != nil {
+			// Tratamento especial para ÁUDIO e VÍDEO (Modo Link Direto + Custom Player via Dashboard Script)
+			isAudio := strings.Contains(mimeType, "audio")
+			isVideo := strings.Contains(mimeType, "video")
+
+			if isAudio || isVideo {
+				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+				defer cancel()
+				ext := mimetypeToExt(mimeType)
+				storageName := fmt.Sprintf("%s/%s_%d%s", instance, evt.Info.ID, time.Now().Unix(), ext)
+				
+				fmt.Printf("[Chatwoot] Uploading %s to Minio for direct playback\n", mimeType)
+				s3URL, uploadErr := s.MediaStorage.Store(ctx, fileBytes, storageName, mimeType)
+				if uploadErr == nil {
+					label := "▶️ **Mensagem de voz**"
+					if isVideo {
+						label = "▶️ **Vídeo**"
+					}
+
+					if content != "" {
+						content = fmt.Sprintf("%s\n\n%s [ ](%s)", content, label, s3URL)
+					} else {
+						content = fmt.Sprintf("%s [ ](%s)", label, s3URL)
+					}
+					isMedia = false // Enviará como texto para ativar o Custom Player do Chatwoot
+				}
+			} else {
+				// Para IMAGENS e FIGURINHAS, mantemos nativo com backup em background
+				go func(data []byte, name string, mt string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					defer cancel()
+					ext := mimetypeToExt(mt)
+					storageName := fmt.Sprintf("%s/%s_%d%s", instance, evt.Info.ID, time.Now().Unix(), ext)
+					_, _ = s.MediaStorage.Store(ctx, data, storageName, mt)
+				}(fileBytes, fileName, mimeType)
+			}
+		}
+		
+		// Envio para o Chatwoot
+		if isMedia {
+			cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes)
+		} else {
+			cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, false, contentAttributes)
+		}
 	} else {
 		cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, false, contentAttributes)
 	}
