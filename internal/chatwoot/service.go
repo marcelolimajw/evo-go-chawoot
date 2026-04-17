@@ -513,6 +513,15 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 			stanzaID = msg.GetVideoMessage().GetContextInfo().GetStanzaID()
 		} else if msg.GetStickerMessage() != nil {
 			stanzaID = msg.GetStickerMessage().GetContextInfo().GetStanzaID()
+		} else if msg.GetReactionMessage() != nil {
+			if key := msg.GetReactionMessage().GetKey(); key != nil {
+				stanzaID = key.GetID()
+			}
+		} else if msg.GetEncReactionMessage() != nil {
+			// EncReactionMessage has a TargetMessageKey
+			if key := msg.GetEncReactionMessage().TargetMessageKey; key != nil {
+				stanzaID = key.GetID()
+			}
 		}
 	}
 
