@@ -231,11 +231,11 @@ func (c *Client) SendMessage(conversationID int, message, msgType, externalID st
 	return res.ID, nil
 }
 
-func (c *Client) SendMessageWithAttachment(conversationID int, message, msgType, externalID string, fileBytes []byte, fileName, mimeType string, contentAttr map[string]interface{}) (int, error) {
+func (c *Client) SendMessageWithAttachment(conversationID int, message, msgType, externalID string, fileBytes []byte, fileName, mimeType string, contentAttr map[string]interface{}, private bool) (int, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	_ = writer.WriteField("message_type", msgType)
-	_ = writer.WriteField("private", "false")
+	_ = writer.WriteField("private", fmt.Sprintf("%t", private))
 
 	// Adiciona conteúdo
 	if message != "" {

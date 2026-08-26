@@ -83,6 +83,8 @@ func (s *Service) GetClientForInstance(instanceName string) *Client {
 	return nil
 }
 
+const mirrorDeviceTitle = "📲 Enviado pelo aparelho:\n"
+
 func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, waClient *whatsmeow.Client) error {
 	client := s.GetClientForInstance(instance)
 	if client == nil {
@@ -224,8 +226,11 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 		msgType = "outgoing"
 	}
 
-	// Formatação para mensagens de grupo
 	content := extractMessageContent(evt, waClient)
+	isEdit := evt.IsEdit || evt.Info.Edit == "1"
+	if isEdit && !strings.HasPrefix(content, "[Editado]") {
+		content = "[Editado] " + content
+	}
 	if isGroup && !evt.Info.IsFromMe {
 		senderName := evt.Info.PushName
 		if senderName == "" {
@@ -241,7 +246,9 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 		}
 	}
 
-	if evt.Info.IsFromMe {
+	isFromMe := evt.Info.IsFromMe
+	if isFromMe {
+		content = mirrorDeviceTitle + content
 		AddToEchoCache(convID, content)
 	}
 
@@ -579,12 +586,12 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 		
 		// Envio para o Chatwoot
 		if isMedia {
-			cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes)
+			cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes, isFromMe)
 		} else {
-			cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, false, contentAttributes)
+			cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, isFromMe, contentAttributes)
 		}
 	} else {
-		cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, false, contentAttributes)
+		cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, isFromMe, contentAttributes)
 	}
 
 	if err == nil && cwMsgID != 0 {
@@ -906,4 +913,15 @@ func extractMessageContentDirect(msg *waE2E.Message, waClient *whatsmeow.Client)
 		return msg.GetInteractiveResponseMessage().GetBody().GetText()
 	}
 	return "[Mensagem de tipo não identificado]"
+}
+
+func extractEditedContent(evt *events.Message, waClient *whatsmeow.Client) string {
+	if evt.RawMessage == nil {
+		return ""
+	}
+	msg := evt.RawMessage
+	if msg.ProtocolMessage == nil || msg.ProtocolMessage.EditedMessage == nil {
+		return ""
+	}
+	return extractMessageContentDirect(msg.ProtocolMessage.EditedMessage, waClient)
 }
