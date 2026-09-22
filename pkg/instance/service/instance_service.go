@@ -227,7 +227,18 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 	}
 
 	// Verifica se a instância já está rodando
-	isInstanceRunning := i.clientPointer[instance.Id] != nil
+	clientPtr := i.clientPointer[instance.Id]
+	isInstanceRunning := clientPtr != nil
+
+	// Se o cliente existe mas não está conectado, pode estar travado (ex: sessão expirada).
+	// Remove o cliente para permitir uma nova conexão (gerando QR ou reconectando).
+	if clientPtr != nil && !clientPtr.IsConnected() {
+		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Client exists but not connected. Removing stuck client to allow fresh connection...", instance.Id)
+
+		i.whatsmeowService.ClearClientRuntime(instance.Id)
+
+		isInstanceRunning = false
+	}
 
 	// Sincroniza as configurações na instância em execução (se já estiver conectada)
 	err = i.whatsmeowService.UpdateInstanceSettings(instance.Id)
@@ -320,52 +331,60 @@ func (i instances) Disconnect(instance *instance_model.Instance) (*instance_mode
 }
 
 func (i instances) Logout(instance *instance_model.Instance) (*instance_model.Instance, error) {
-	client, err := i.ensureClientConnected(instance.Id)
+	client := i.clientPointer[instance.Id]
+
+	if client == nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] No client in memory for logout, starting instance to clear stored session", instance.Id)
+		err := i.whatsmeowService.StartInstance(instance.Id)
+		if err == nil {
+			time.Sleep(2 * time.Second)
+			client = i.clientPointer[instance.Id]
+		}
+		if client == nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] No client found in memory for logout", instance.Id)
+			return instance, fmt.Errorf("no client found in memory for logout")
+		}
+	}
+
+	ctx := context.Background()
+
+	if client.IsLoggedIn() && client.IsConnected() {
+		err := client.Logout(ctx)
+		if err != nil {
+			return instance, err
+		}
+	} else if client.IsConnected() {
+		client.Disconnect()
+	} else {
+		// Cliente existe mas está travado (não conectado, ex: sessão expirada).
+		// Limpa a sessão salva diretamente para que um novo QR possa ser gerado.
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Client not connected. Clearing stored session directly...", instance.Id)
+		if client.Store != nil {
+			if err := client.Store.Delete(ctx); err != nil {
+				i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to clear stored session: %v", instance.Id, err)
+				return instance, err
+			}
+		}
+	}
+
+	instance.Connected = false
+	err := i.instanceRepository.Update(instance)
 	if err != nil {
 		return instance, err
 	}
 
-	if client.IsLoggedIn() && client.IsConnected() {
-		err := client.Logout(context.Background())
-		if err != nil {
-			return instance, err
-		}
+	// Remove o runtime antigo e reinicia de forma limpa (com novo killChannel)
+	// para que um QR code novo seja gerado.
+	i.whatsmeowService.ClearClientRuntime(instance.Id)
 
-		instance.Connected = false
-		err = i.instanceRepository.Update(instance)
-		if err != nil {
-			return instance, err
-		}
-
-		select {
-		case i.killChannel[instance.Id] <- true:
-		case <-time.After(5 * time.Second):
-		}
-
-		delete(i.clientPointer, instance.Id)
-		delete(i.killChannel, instance.Id)
-
-		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Logout successful", instance.Id)
-		return instance, nil
+	err = i.whatsmeowService.StartInstance(instance.Id)
+	if err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to restart instance after logout: %v", instance.Id, err)
+		return instance, err
 	}
 
-	if client.IsConnected() {
-		client.Disconnect()
-
-		select {
-		case i.killChannel[instance.Id] <- true:
-		case <-time.After(5 * time.Second):
-		}
-
-		delete(i.clientPointer, instance.Id)
-		delete(i.killChannel, instance.Id)
-
-		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Disconnection successful", instance.Id)
-		return instance, nil
-	}
-
-	i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Ignoring logout as it was not connected", instance.Id)
-	return instance, fmt.Errorf("ignoring logout as it was not connected")
+	i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Logout successful", instance.Id)
+	return instance, nil
 }
 
 func (i instances) Status(instance *instance_model.Instance) (*StatusStruct, error) {

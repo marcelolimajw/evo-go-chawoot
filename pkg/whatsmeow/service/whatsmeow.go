@@ -60,6 +60,7 @@ type WhatsmeowService interface {
 	ForceUpdateJid(instanceId string, number string) error
 	UpdateInstanceSettings(instanceId string) error
 	UpdateInstanceAdvancedSettings(instanceId string) error
+	ClearClientRuntime(instanceId string)
 	GetPollService() poll_service.PollService // NOVO: Acesso ao serviço de polls
 }
 
@@ -366,6 +367,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		if err == nil {
 			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
 		}
+		store.SetWAVersion(store.WAVersionContainer{uint32(version.Major), uint32(version.Minor), uint32(version.Patch)})
 	} else {
 		// Try to fetch version from WhatsApp Web
 		webVersion, err := fetchWhatsAppWebVersion()
@@ -377,6 +379,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 			store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
 			store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
 			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
+			store.SetWAVersion(store.WAVersionContainer{uint32(version.Major), uint32(version.Minor), uint32(version.Patch)})
 		}
 	}
 
@@ -1034,7 +1037,27 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			messageSize = fmt.Sprintf("%d bytes", *evt.Message.GetAudioMessage().FileLength)
 		}
 
-		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] ===== MESSAGE RECEIVED ===== ID: %s, From: %s, Type: %s, Size: %s", mycli.userID, evt.Info.ID, evt.Info.Chat.String(), evt.Info.Type, messageSize)
+		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] ===== MESSAGE RECEIVED ===== ID: %s, From: %s, Type: %s, Edit: '%s', Size: %s", mycli.userID, evt.Info.ID, evt.Info.Chat.String(), evt.Info.Type, evt.Info.Edit, messageSize)
+
+		if evt.IsEdit || evt.Info.Edit != "" {
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] *** THIS IS AN EDIT *** ID=%s, IsEdit=%v, Info.Edit='%s'", mycli.userID, evt.Info.ID, evt.IsEdit, evt.Info.Edit)
+		}
+
+		// Decrypt SecretEncryptedMessage (mobile edits arrive in this format)
+		if evt.Message.GetSecretEncryptedMessage() != nil {
+			encMsg := evt.Message.GetSecretEncryptedMessage()
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] *** SECRET ENCRYPTED MESSAGE *** Type=%v, OriginalID=%s", mycli.userID, encMsg.GetSecretEncType(), encMsg.GetTargetMessageKey().GetID())
+			if encMsg.GetSecretEncType() == waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
+				decrypted, err := mycli.WAClient.DecryptSecretEncryptedMessage(context.Background(), evt)
+				if err != nil {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Failed to decrypt secret encrypted message: %v", mycli.userID, err)
+				} else {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] *** DECRYPTED EDIT Content='%s'", mycli.userID, decrypted.GetConversation())
+					evt.Message = decrypted
+					evt.IsEdit = true
+				}
+			}
+		}
 
 		// se readMessages for true ele marca como lida
 		if mycli.Instance.ReadMessages {
@@ -2468,6 +2491,28 @@ func (w whatsmeowService) ClearInstanceCache(instanceId string, token string) er
 
 	w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Instance cache completely cleared", instanceId)
 	return nil
+}
+
+// ClearClientRuntime remove o cliente do runtime (clientPointer, myClientPointer e killChannel)
+// para que uma nova conexão possa ser iniciada do zero.
+// IMPORTANTE: não envia sinal no killChannel nem o fecha — a goroutine do cliente
+// reinicia automaticamente ao receber o sinal (StartClient no loop), o que causaria
+// um start duplo aqui. Apenas remove as referências; a goroutine antiga fica ociosa.
+func (w *whatsmeowService) ClearClientRuntime(instanceId string) {
+	if _, exists := w.killChannel[instanceId]; exists {
+		delete(w.killChannel, instanceId)
+		w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Kill channel cleared", instanceId)
+	}
+
+	if _, exists := w.clientPointer[instanceId]; exists {
+		delete(w.clientPointer, instanceId)
+		w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Client pointer cleared", instanceId)
+	}
+
+	if _, exists := w.myClientPointer[instanceId]; exists {
+		delete(w.myClientPointer, instanceId)
+		w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] MyClient pointer cleared", instanceId)
+	}
 }
 
 func NewWhatsmeowService(

@@ -16,6 +16,12 @@
 
 Evolution Go is a high-performance WhatsApp API built in Go, part of the [Evolution](https://evolutionfoundation.com.br/) ecosystem. It provides a robust, lightweight solution for WhatsApp integration using the [whatsmeow](https://github.com/tulir/whatsmeow) library.
 
+> **⚠️ Fork com customizações locais:** este repositório inclui uma integração
+> completa e personalizada com **Chatwoot** (multi-instância, mídia híbrida via
+> Minio, player customizado no dashboard, supressão de eco, mapeamento de
+> replies/deleções). Veja [`AGENTS.md`](./AGENTS.md) para o contexto técnico
+> completo e [`Extras/chatwoot/`](./Extras/chatwoot/) para o Dashboard Script.
+
 ## Features
 
 - **High Performance** — Built with Go for minimal resource usage
