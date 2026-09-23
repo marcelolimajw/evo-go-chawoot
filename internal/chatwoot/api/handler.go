@@ -328,6 +328,16 @@ func (h *WebhookHandler) HandleWebhook(c *gin.Context) {
 		}
 	}
 
+	// Menção real para grupos: converte @nome/@numero digitado no Chatwoot para o
+	// formato @<numero> + MentionedJID que o WhatsApp exige para renderizar a menção.
+	var mentionedJIDs []string
+	if strings.Contains(fullJid, "@g.us") && strings.Contains(content, "@") {
+		if newContent, mentioned := h.SendService.ResolveGroupMentions(instance.Id, fullJid, content); len(mentioned) > 0 {
+			content = newContent
+			mentionedJIDs = mentioned
+		}
+	}
+
 	attachments := payload.Message.Attachments
 	if len(attachments) == 0 {
 		attachments = payload.Attachments
@@ -374,21 +384,23 @@ func (h *WebhookHandler) HandleWebhook(c *gin.Context) {
 		}
 
 		mediaData := &send_service.MediaStruct{
-			Number:   fullJid,
-			Caption:  content,
-			Url:      att.DataURL,
-			Filename: fName,
-			Type:     mType,
-			Quoted:   quoted,
+			Number:       fullJid,
+			Caption:      content,
+			Url:          att.DataURL,
+			Filename:     fName,
+			Type:         mType,
+			Quoted:       quoted,
+			MentionedJID: mentionedJIDs,
 		}
 		msgSend, err = h.SendService.SendMediaUrl(mediaData, instance)
 	} else if content != "" {
 		formatJid := false
 		textData := &send_service.TextStruct{
-			Number:    fullJid,
-			Text:      content,
-			FormatJid: &formatJid,
-			Quoted:    quoted,
+			Number:       fullJid,
+			Text:         content,
+			FormatJid:    &formatJid,
+			Quoted:       quoted,
+			MentionedJID: mentionedJIDs,
 		}
 		msgSend, err = h.SendService.SendText(textData, instance)
 	}

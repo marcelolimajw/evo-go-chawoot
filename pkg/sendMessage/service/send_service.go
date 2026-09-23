@@ -43,6 +43,7 @@ type SendService interface {
 	SendContact(data *ContactStruct, instance *instance_model.Instance) (*MessageSendStruct, error)
 	SendButton(data *ButtonStruct, instance *instance_model.Instance) (*MessageSendStruct, error)
 	SendList(data *ListStruct, instance *instance_model.Instance) (*MessageSendStruct, error)
+	ResolveGroupMentions(instanceId string, groupJid string, text string) (string, []string)
 }
 
 type sendService struct {
@@ -522,6 +523,182 @@ func (s *sendService) sendTextWithRetry(data *TextStruct, instance *instance_mod
 	}
 
 	return nil, fmt.Errorf("failed to send text after %d attempts", maxRetries)
+}
+
+// ResolveGroupMentions identifica menções no formato @{nome|numero} no texto destinado
+// a um grupo do WhatsApp e devolve o texto reescrito no formato @<numero> (exigido pelo
+// WhatsApp para renderizar a menção) junto com a lista de MentionedJID.
+// Se o cliente/grupo não estiverem disponíveis ou nenhuma menção for resolvida,
+// retorna o texto original e lista vazia (fallback para texto puro).
+func (s *sendService) ResolveGroupMentions(instanceId string, groupJid string, text string) (string, []string) {
+	if text == "" || groupJid == "" {
+		return text, nil
+	}
+	if !strings.Contains(text, "@") {
+		return text, nil
+	}
+
+	client := s.clientPointer[instanceId]
+	if client == nil {
+		s.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] ResolveGroupMentions: client nao disponivel, mantendo texto original", instanceId)
+		return text, nil
+	}
+
+	groupJID, ok := utils.ParseJID(groupJid)
+	if !ok {
+		return text, nil
+	}
+
+	groupInfo, err := client.GetGroupInfo(context.Background(), groupJID)
+	if err != nil {
+		s.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] ResolveGroupMentions: falha ao obter grupo %s: %v", instanceId, groupJid, err)
+		return text, nil
+	}
+
+	// Monta mapa de resolucao: numero normalizado e nome (PushName/FullName) -> participante
+	resolvidos := make(map[string]mentionResolucao)
+	var participantes []string
+	for _, p := range groupInfo.Participants {
+		userPart := p.JID.User
+		if userPart == "" {
+			continue
+		}
+		jidStr := p.JID.String()
+		participantes = append(participantes, jidStr)
+		resolvidos[userPart] = mentionResolucao{numero: userPart, jid: jidStr}
+
+		// Variantes com/sem DDI 55 (ex. @85989605635 vs participant 558589605635...)
+		addNumeroVariants(resolvidos, userPart, jidStr)
+
+		if client.Store == nil {
+			continue
+		}
+		c, err := client.Store.Contacts.GetContact(context.Background(), p.JID)
+		if err != nil || !c.Found {
+			continue
+		}
+		nome := c.PushName
+		if nome == "" {
+			nome = c.FullName
+		}
+		if nome != "" {
+			key := strings.ToLower(strings.TrimSpace(nome))
+			if _, existe := resolvidos[key]; !existe {
+				resolvidos[key] = mentionResolucao{numero: userPart, jid: jidStr}
+			}
+		}
+	}
+
+	// Percorre os tokens @... do texto
+	mentionRegex := regexp.MustCompile(`@([^\s@]+)`)
+	var mentioned []string
+	jaMencionados := make(map[string]bool)
+	novoTexto := mentionRegex.ReplaceAllStringFunc(text, func(token string) string {
+		raw := strings.TrimPrefix(token, "@")
+		// Remove marcadores de markdown que o Chatwoot pode inserir (ex. @**numero**)
+		raw = strings.Trim(raw, "*_`")
+		alvo := strings.ToLower(strings.TrimSpace(raw))
+
+		if r, ok := resolvidos[alvo]; ok {
+			if !jaMencionados[r.jid] {
+				jaMencionados[r.jid] = true
+				mentioned = append(mentioned, r.jid)
+			}
+			return "@" + r.numero
+		}
+
+		// Sem match: tenta casar numero ignorando formatacao
+		if r, ok := casarNumeroParticipante(participantes, alvo); ok {
+			if !jaMencionados[r.jid] {
+				jaMencionados[r.jid] = true
+				mentioned = append(mentioned, r.jid)
+			}
+			return "@" + r.numero
+		}
+
+		// Fallback: mantem o texto como estava
+		return token
+	})
+
+	s.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] ResolveGroupMentions: %d mencao(ns) resolvida(s)", instanceId, len(mentioned))
+	return novoTexto, mentioned
+}
+
+// mentionResolucao mapeia um alvo (nome ou numero) para o participante correspondente.
+type mentionResolucao struct {
+	numero string
+	jid    string
+}
+
+// addNumeroVariants registra variantes comuns do numero do participante (DDD 55 com/sem,
+// com/sem 9º dígito) para casar digitacoes como @85989605635 quando o JID e 55859989605635.
+func addNumeroVariants(resolvidos map[string]mentionResolucao, userPart, jidStr string) {
+	variants := montarVariantesNumero(userPart)
+	for _, v := range variants {
+		if v != "" && v != userPart {
+			if _, existe := resolvidos[v]; !existe {
+				resolvidos[v] = mentionResolucao{numero: userPart, jid: jidStr}
+			}
+		}
+	}
+}
+
+// casarNumeroParticipante tenta encontrar um participante cujo numero (em qualquer variante)
+// termine com os digitos digitados (ex. @85989605635 casa com 558589605635).
+func casarNumeroParticipante(participantes []string, alvo string) (mentionResolucao, bool) {
+	if !isAllDigits(alvo) {
+		return mentionResolucao{}, false
+	}
+	for _, p := range participantes {
+		userPart := strings.Split(p, "@")[0]
+		if alvo == userPart {
+			return mentionResolucao{numero: userPart, jid: p}, true
+		}
+		// Numeros no formato WhatsApp costumam ser 55+DDD+numero. Comparamos o sufixo
+		// quando a digitacao nao tem o DDI, e vice-versa.
+		if len(alvo) != len(userPart) {
+			menor, maior := alvo, userPart
+			if len(alvo) > len(userPart) {
+				menor, maior = userPart, alvo
+			}
+			if strings.HasSuffix(maior, menor) && len(menor) >= 10 {
+				return mentionResolucao{numero: userPart, jid: p}, true
+			}
+		}
+	}
+	return mentionResolucao{}, false
+}
+
+// montarVariantesNumero gera as variantes do user part (DDD 55 com/sem e 9º dígito
+// com/sem, mesma lógica do 9º dígito usada no Chatwoot). Ex.: 5585989605635 (13) -->
+// 558589605635 (12) e 8589605635 (11).
+func montarVariantesNumero(userPart string) []string {
+	variants := []string{userPart}
+	semDDI := strings.TrimPrefix(userPart, "55")
+	if semDDI != "" && semDDI != userPart {
+		variants = append(variants, semDDI)
+	}
+	// 55 + DDD(2) + [9] + 8 dígitos: 13 chars com o 9, 12 sem o 9 (posição 4)
+	if strings.HasPrefix(userPart, "55") {
+		if len(userPart) == 13 {
+			variants = append(variants, userPart[:4]+userPart[5:])
+		} else if len(userPart) == 12 {
+			variants = append(variants, userPart[:4]+"9"+userPart[4:])
+		}
+	}
+	return variants
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func fetchLinkMetadata(url string) (string, string, string, error) {
