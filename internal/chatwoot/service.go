@@ -889,7 +889,10 @@ func extractMessageContentDirect(msg *waE2E.Message, waClient *whatsmeow.Client)
 		return "[Localização]"
 	}
 	if msg.GetContactMessage() != nil {
-		return "[Contato]"
+		return formatContactMessage(msg.GetContactMessage())
+	}
+	if msg.GetContactsArrayMessage() != nil {
+		return formatContactsArrayMessage(msg.GetContactsArrayMessage())
 	}
 	if msg.GetReactionMessage() != nil {
 		return "Reagiu: " + msg.GetReactionMessage().GetText()
@@ -913,6 +916,92 @@ func extractMessageContentDirect(msg *waE2E.Message, waClient *whatsmeow.Client)
 		return msg.GetInteractiveResponseMessage().GetBody().GetText()
 	}
 	return "[Mensagem de tipo não identificado]"
+}
+
+// formatContactMessage formata um contato único (vCard) recebido do WhatsApp,
+// extraindo o nome exibido e os números de telefone presentes no vCard.
+func formatContactMessage(cm *waE2E.ContactMessage) string {
+	if cm == nil {
+		return "[Contato]"
+	}
+	displayName := strings.TrimSpace(cm.GetDisplayName())
+	numbers := extractPhoneNumbersFromVCard(cm.GetVcard())
+	return mountContactText(displayName, numbers)
+}
+
+// formatContactsArrayMessage formata um lote de contatos (vCards) recebido do WhatsApp.
+func formatContactsArrayMessage(cam *waE2E.ContactsArrayMessage) string {
+	if cam == nil {
+		return "[Contato]"
+	}
+	contacts := cam.GetContacts()
+	if len(contacts) == 0 {
+		return formatContactMessage(&waE2E.ContactMessage{DisplayName: cam.DisplayName})
+	}
+	var parts []string
+	for _, c := range contacts {
+		displayName := strings.TrimSpace(c.GetDisplayName())
+		numbers := extractPhoneNumbersFromVCard(c.GetVcard())
+		parts = append(parts, mountContactText(displayName, numbers))
+	}
+	return "[Contatos]\n" + strings.Join(parts, "\n")
+}
+
+// mountContactText monta o texto legível do contato: nome (quando existir)
+// seguido do(s) número(s). Fallback para "[Contato]" se nada for extraído.
+func mountContactText(displayName string, numbers []string) string {
+	if displayName == "" && len(numbers) == 0 {
+		return "[Contato]"
+	}
+	var sb strings.Builder
+	sb.WriteString("[Contato]")
+	if displayName != "" {
+		sb.WriteString(" " + displayName)
+	}
+	if len(numbers) > 0 {
+		sb.WriteString("\n" + strings.Join(numbers, "\n"))
+	}
+	return sb.String()
+}
+
+// extractPhoneNumbersFromVCard extrai os números de telefone (TEL) de um vCard.
+// O WhatsApp grava o número no formato waid=<numero> ou TEL;type=...:<numero>.
+func extractPhoneNumbersFromVCard(vcard string) []string {
+	if vcard == "" {
+		return nil
+	}
+	var numbers []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(line), "TEL") {
+			continue
+		}
+		// Formatos possíveis:
+		//   TEL;type=CELL;type=VOICE;waid=558589605635:+55 85 98960-5635
+		//   TEL:+55 85 98960-5635
+		lower := strings.ToLower(line)
+		num := ""
+		if idx := strings.Index(lower, "waid="); idx >= 0 {
+			rest := line[idx+len("waid="):]
+			if colon := strings.Index(rest, ":"); colon >= 0 {
+				rest = rest[:colon]
+			}
+			num = strings.TrimSpace(rest)
+		} else if colon := strings.Index(line, ":"); colon >= 0 {
+			num = strings.TrimSpace(line[colon+1:])
+		}
+		if num == "" {
+			continue
+		}
+		// Normaliza: remove espaços, traços e parênteses
+		clean := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(num)
+		if !seen[clean] {
+			seen[clean] = true
+			numbers = append(numbers, num)
+		}
+	}
+	return numbers
 }
 
 func extractEditedContent(evt *events.Message, waClient *whatsmeow.Client) string {
