@@ -965,7 +965,8 @@ func mountContactText(displayName string, numbers []string) string {
 }
 
 // extractPhoneNumbersFromVCard extrai os números de telefone (TEL) de um vCard.
-// O WhatsApp grava o número no formato waid=<numero> ou TEL;type=...:<numero>.
+// O WhatsApp grava o número no formato waid=<numero> ou TEL;type=...:<numero>,
+// podendo vir com prefixo de grupo (ex.: ITEM1.TEL;type=...;waid=...).
 func extractPhoneNumbersFromVCard(vcard string) []string {
 	if vcard == "" {
 		return nil
@@ -974,11 +975,12 @@ func extractPhoneNumbersFromVCard(vcard string) []string {
 	seen := make(map[string]bool)
 	for _, line := range strings.Split(vcard, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToUpper(line), "TEL") {
+		if !isVCardTelLine(line) {
 			continue
 		}
 		// Formatos possíveis:
-		//   TEL;type=CELL;type=VOICE;waid=558589605635:+55 85 98960-5635
+		//   ITEM1.TEL;type=CELL;type=VOICE;waid=558589605635:+55 85 98960-5635
+		//   TEL;type=CELL;waid=558589605635:+55 85 98960-5635
 		//   TEL:+55 85 98960-5635
 		lower := strings.ToLower(line)
 		num := ""
@@ -1002,6 +1004,21 @@ func extractPhoneNumbersFromVCard(vcard string) []string {
 		}
 	}
 	return numbers
+}
+
+// isVCardTelLine indica se a linha do vCard é uma propriedade TEL, aceitando
+// prefixos de grupo (ex.: ITEM1.TEL, item2.tel) usados por celulares/Android.
+func isVCardTelLine(line string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(line))
+	if upper == "" {
+		return false
+	}
+	// Isola a propriedade (parte antes de ':' e de ';')
+	prop := upper
+	if idx := strings.IndexAny(prop, ";:"); idx >= 0 {
+		prop = prop[:idx]
+	}
+	return prop == "TEL" || strings.HasSuffix(prop, ".TEL")
 }
 
 func extractEditedContent(evt *events.Message, waClient *whatsmeow.Client) string {
