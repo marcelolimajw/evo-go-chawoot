@@ -241,6 +241,7 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	if isForwardedContext(msg) {
 		isForwarded = true
 	}
+	logForwardDiagnostics(evt, msg, isForwarded)
 
 	content := extractMessageContentFrom(msg, waClient)
 	isEdit := evt.IsEdit || evt.Info.Edit == "1"
@@ -918,19 +919,101 @@ func messageContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
 		return msg.GetStickerMessage().GetContextInfo()
 	case msg.GetLocationMessage() != nil:
 		return msg.GetLocationMessage().GetContextInfo()
+	case msg.GetLiveLocationMessage() != nil:
+		return msg.GetLiveLocationMessage().GetContextInfo()
 	case msg.GetContactMessage() != nil:
 		return msg.GetContactMessage().GetContextInfo()
 	}
 	return nil
 }
 
+// logForwardDiagnostics imprime o estado do ContextInfo de cada mensagem recebida.
+// O WhatsApp sinaliza "encaminhada" em campos diferentes conforme o tipo de
+// conteúdo, e o nome do campo varia entre versões; o log deixa visível qual sinal
+// chegou em cada caso, para não depender de suposição.
+func logForwardDiagnostics(evt *events.Message, msg *waE2E.Message, isForwarded bool) {
+	kind := contentKind(msg)
+	ctx := messageContextInfo(msg)
+	fmt.Printf("[Chatwoot] fwd-diag: kind=%s seta=%v ctx=%v isForwarded=%v forwardingScore=%d stanzaID=%q participant=%q remoteJID=%q comment=%q\n",
+		kind,
+		isForwarded,
+		ctx != nil,
+		ctx.GetIsForwarded(),
+		ctx.GetForwardingScore(),
+		ctx.GetStanzaID(),
+		ctx.GetParticipant(),
+		ctx.GetRemoteJID(),
+		commentOf(msg),
+	)
+	_ = evt
+}
+
+// contentKind nomeia o tipo de conteúdo presente na mensagem, para o log.
+func contentKind(msg *waE2E.Message) string {
+	switch {
+	case msg == nil:
+		return "nil"
+	case msg.GetExtendedTextMessage() != nil:
+		return "text"
+	case msg.GetImageMessage() != nil:
+		return "image"
+	case msg.GetVideoMessage() != nil:
+		return "video"
+	case msg.GetAudioMessage() != nil:
+		return "audio"
+	case msg.GetDocumentMessage() != nil:
+		return "document"
+	case msg.GetStickerMessage() != nil:
+		return "sticker"
+	case msg.GetLocationMessage() != nil:
+		return "location"
+	case msg.GetLiveLocationMessage() != nil:
+		return "livelocation"
+	case msg.GetContactMessage() != nil:
+		return "contact"
+	case msg.GetReactionMessage() != nil:
+		return "reaction"
+	case msg.GetEncReactionMessage() != nil:
+		return "encreaction"
+	case msg.GetProtocolMessage() != nil:
+		return "protocol"
+	}
+	return "outro"
+}
+
+// commentOf devolve o comentário/legenda, que em conteúdo reencaminhado
+// carrega o texto original de quem enviou.
+func commentOf(msg *waE2E.Message) string {
+	if msg == nil {
+		return ""
+	}
+	switch {
+	case msg.GetLocationMessage() != nil:
+		return msg.GetLocationMessage().GetComment()
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetCaption()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetCaption()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetCaption()
+	}
+	return ""
+}
+
 // isForwardedContext informa se o WhatsApp marcou a mensagem como encaminhada.
 //
-// Este e o sinal confiavel: encaminhadas comuns (localizacao, foto, texto) nao
-// usam nenhum wrapper, apenas carregam ContextInfo.isForwarded = true. Por isso
-// os wrappers de transporte como spoilerMessage nao viram seta "\u21aa".
+// Encaminhadas comuns (localizacao, foto, texto) nao usam nenhum wrapper: o sinal
+// esta no ContextInfo da mensagem de conteudo. O WhatsApp usa dois campos para
+// isso e nao sistematicamente o mesmo em todos os tipos de conteudo —
+// isForwarded (booleano) e forwardingScore (contador, > 0 quando a mensagem foi
+// encaminhada). So ler o booleano deixava a localizacao para fora da seta, porque
+// nela o WhatsApp preenche forwardingScore. Qualquer um dos dois marca a seta.
+//
+// Por isso os wrappers de transporte como spoilerMessage nao viram seta: eles
+// dizem apenas que a mensagem esta embrulhada, nao que foi encaminhada.
 func isForwardedContext(msg *waE2E.Message) bool {
-	return messageContextInfo(msg).GetIsForwarded()
+	ctx := messageContextInfo(msg)
+	return ctx.GetIsForwarded() || ctx.GetForwardingScore() > 0
 }
 
 // applyDecorations acrescenta os prefixos de edicao e de encaminhada.

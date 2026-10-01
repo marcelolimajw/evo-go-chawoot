@@ -455,3 +455,63 @@ func TestComposicaoFinal_LocalizacaoDiretaNaoRecebeSeta(t *testing.T) {
 		t.Errorf("localização direta deve manter o cabeçalho: %q", content)
 	}
 }
+
+// Regressão: localizacao encaminhada nao recebia a seta. O WhatsApp sinaliza
+// "encaminhada" em dois campos do ContextInfo e nao usa o mesmo em todos os
+// tipos de conteudo: em localizacao ele preenche forwardingScore em vez de
+// isForwarded. Ler so o booleano deixava a localizacao de fora.
+func TestIsForwardedContext_ForwardingScore(t *testing.T) {
+	msg := &waE2E.Message{
+		LocationMessage: &waE2E.LocationMessage{
+			DegreesLatitude: proto.Float64(-3.825716),
+			ContextInfo:     &waE2E.ContextInfo{ForwardingScore: proto.Uint32(1)},
+		},
+	}
+	if !isForwardedContext(msg) {
+		t.Error("localizacao com forwardingScore>0 deveria receber a seta")
+	}
+}
+
+func TestIsForwardedContext_LiveLocation(t *testing.T) {
+	msg := &waE2E.Message{
+		LiveLocationMessage: &waE2E.LiveLocationMessage{
+			DegreesLatitude: proto.Float64(-3.825716),
+			ContextInfo:     &waE2E.ContextInfo{IsForwarded: proto.Bool(true)},
+		},
+	}
+	if !isForwardedContext(msg) {
+		t.Error("live location encaminhada deveria receber a seta")
+	}
+}
+
+func TestIsForwardedContext_ForwardingScoreZeroNaoEhEncaminhada(t *testing.T) {
+	msg := &waE2E.Message{
+		LocationMessage: &waE2E.LocationMessage{
+			DegreesLatitude: proto.Float64(-3.825716),
+			ContextInfo:     &waE2E.ContextInfo{ForwardingScore: proto.Uint32(0)},
+		},
+	}
+	if isForwardedContext(msg) {
+		t.Error("forwardingScore=0 não é encaminhamento")
+	}
+}
+
+// Localização encaminhada via forwardingScore (o caso real da conversa 167).
+func TestComposicaoFinal_LocalizacaoEncaminhadaPorForwardingScore(t *testing.T) {
+	evt := testGroupEvent("Marcelo", "558589605635", false)
+	msg := &waE2E.Message{
+		LocationMessage: &waE2E.LocationMessage{
+			DegreesLatitude:  proto.Float64(-3.825716),
+			DegreesLongitude: proto.Float64(-38.556443),
+			ContextInfo:      &waE2E.ContextInfo{ForwardingScore: proto.Uint32(1)},
+		},
+	}
+	content := senderHeader(evt, true) + renderLocation(msg.GetLocationMessage())
+	content = applyDecorations(content, false, isForwardedContext(msg))
+
+	want := "↪ **558589605635 - Marcelo:**\n\n" +
+		"📍 Localização\nhttps://maps.google.com/maps?q=-3.825716,-38.556443"
+	if content != want {
+		t.Errorf("got %q, want %q", content, want)
+	}
+}
