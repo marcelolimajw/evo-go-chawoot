@@ -51,6 +51,64 @@ Extras/chatwoot/             # Dashboard Script (player de áudio/vídeo) + inst
   (`in_reply_to` → mapeamento reverso CW→WA) e assinatura opcional do agente.
 - Deleção no Chatwoot (`message_updated` deleted) propaga para o WhatsApp.
 
+### `source_id` do contact_inbox e disparo em massa (Campaign)
+
+Este é o ponto mais frágil da integração. Leia antes de mexer em
+`CreateContact`/`CreateConversation`.
+
+**Convenção vigente:** o `source_id` do `contact_inbox` deve ser
+
+| caso | `source_id` | `identifier` do contato |
+|---|---|---|
+| contato individual (`s.whatsapp.net`) | **só os dígitos** (`558589605635`) | JID (`558589605635@s.whatsapp.net`) |
+| grupo (`@g.us`) / LID (`@lid`) | JID completo | JID completo |
+
+Derivado por `chatwootSourceID()` (`internal/chatwoot/service.go`) e aplicado
+num ponto único. **O `targetID` (identifier) NÃO deve ser alterado** — a busca
+de contatos e a lógica do 9º dígito dependem dele.
+
+**Por que os dígitos:** o disparo em massa (Campaign/Kanban do fork AstraChat)
+é baseado em telefone e resolve a conversa pelo `source_id`. Em inbox
+`Channel::Api`, `CampaignSender#candidate_source_ids` retorna só
+`[phone.gsub(/\D/,'')]`. Com o JID no `source_id`, a campanha não acha o
+`contact_inbox` e cria outro → **nova conversa duplicada**. Com dígitos, ela
+acha e cai no `build_conversation`, que reabre a conversa existente.
+
+**Fatos do Chatwoot (v4.17.0-1, fork AstraChat) que sustentam isso:**
+
+- `ContactInboxBuilder#generate_source_id` → para `Channel::Api` o Chatwoot
+  gera **`SecureRandom.uuid`**, não telefone. Ou seja, "source_id = telefone"
+  é uma convenção **da nossa integração**, não do Chatwoot.
+- A API **não expõe update de `contact_inbox`** (`contact_inboxes_controller`
+  só tem `filter`; `contacts_controller` não aceita `source_id` no PUT).
+  Portanto o `source_id` só pode ser definido **na criação** — por isso
+  mandamos `source_id` no `POST /contacts` **e** no `POST /conversations`.
+- `lock_to_single_conversation = true` na inbox → `ConversationBuilder`
+  reaproveita `contact_inbox.conversations.last`, e o `POST /conversations`
+  acha o `contact_inbox` pelo `source_id`. Com `source_id` único e estável
+  por contato, nasce **1 contact_inbox por contato**.
+- Apagar um contato apaga conversas e `contact_inboxes`
+  (`dependent: :destroy_async`) **e as etiquetas** (`acts_as_taggable_on`) —
+  ao recriar o contato é preciso **reaplicar a etiqueta**.
+- Se houver corrida na deleção assíncrona, `ContactInboxBuilder#update_old_contact_inbox`
+  renomeia o `source_id` antigo para um valor aleatório (se auto-protege).
+- `normalize_phone` da campanha é só `to_s.gsub(/\D/,'')` — **não mexe no 9º
+  dígito nem no código de país**. Logo o **CSV precisa do número em E.164 com
+  código de país** (`558589605635`). Sem o `55`, a campanha cria um contato com
+  outro número e, quando o cliente responde, o evo-go não acha e abre uma
+  segunda conversa.
+- O evo-go reabre conversa resolvida: `GetConversations` (`client.go`) usa
+  `GET /contacts/:id/conversations`, que vem `order(last_activity_at: :desc)`
+  **sem filtro de status**, e devolve a primeira da inbox.
+
+**⚠️ Pendência do lado Chatwoot (não corrigir aqui):** contatos criados
+**nativamente** no Chatwoot (UI, outras integrações) recebem `source_id` UUID,
+e a campanha só procura dígitos. Se esse contato falar no WhatsApp, o evo-go
+cria um `contact_inbox` de dígitos **adicional** — inofensivo (o de dígitos é
+o canônico para a campanha), mas o extra só sai com patch no Chatwoot. Vale
+lembrar que o fork AstraChat é **bytecode YARB**: se for necessário patchar,
+usar um initializer que reabre a classe (não editar o `.yarb`).
+
 ### Configuração multi-instância
 
 `manager.go` persiste configs por instância (URL, token, account_id, inbox_id,
@@ -108,20 +166,49 @@ Detalhes críticos:
 6. Ao alterar o player JS, manter os 3 arquivos de `Extras/chatwoot/`
    sincronizados (mesmo corpo; só muda o wrapper/header) e validar sintaxe
    (esprima/node --check).
+7. **Nunca voltar a passar `targetID` como `source_id`.** Sempre usar
+   `chatwootSourceID(targetID, isGroup)` em `CreateContact` **e** em
+   `CreateConversation`, senão a campanha em massa volta a duplicar conversas.
+8. Ao extrair telefone de vCard, a propriedade pode vir como `ITEM1.TEL` /
+   `item2.tel` (formato Android/WhatsApp), não só `TEL`. Por isso o parser usa
+   `isVCardTelLine()` (aceita propriedade terminada em `.TEL`) — não trocar de
+   volta para `strings.HasPrefix(line, "TEL")`, que quebra no celular.
 
 ## 5. Build/teste rápido
+
+Go **não está instalado no host** — compilar via container:
+
+```bash
+docker run --rm -v /root/evolution-go:/build -w /build golang:1.25.0-alpine \
+  sh -c "apk add --no-cache git build-base libjpeg-turbo-dev libwebp-dev \
+  && go build ./... && go vet ./..."
+```
 
 ```bash
 go build ./...          # compilar
 go vet ./...            # lint estático
 # binário principal:
 go build -o evolution-go ./cmd/evolution-go
+# imagem (versionar sempre):
+docker build --build-arg VERSION=<x.y.z> -t marcelolimajw/evolution-go-chatwoot:<x.y.z> .
 ```
 
 Não há suíte de testes automatizados da integração Chatwoot; validação é manual:
-enviar áudio/vídeo/imagem de um celular para a instância conectada e conferir
-entrega no painel + playback via Dashboard Script, e responder/deletar do
-Chatwoot conferindo reflexo no WhatsApp.
+- mídia: enviar áudio/vídeo/imagem de um celular para a instância conectada e
+  conferir entrega no painel + playback via Dashboard Script;
+- resposta/deleção: responder/deletar do Chatwoot conferindo reflexo no WhatsApp;
+- vCard: enviar um contato de um celular e conferir que chega **nome e número**;
+- disparo em massa: criar campanha (por **etiqueta** ou **CSV** com número em
+  E.164) e conferir que a mensagem cai na conversa **existente**, sem criar
+  conversa nova.
+
+Chatwoot local de desenvolvimento: banco `postgres` container, `chatwoot` db
+(`docker exec postgres psql -U postgres -d chatwoot`). Comandos úteis de
+inspeção: `contact_inboxes.source_id` (tem índice único `(inbox_id,
+source_id)`), `conversations.contact_inbox_id`, `kanban_campaign_contacts.phone`.
+O código do Chatwoot está em `/app` no container `chatwoot`; o fork AstraChat
+entrega lógica em **bytecode YARB** — inspecione com `strings` ou
+`RubyVM::InstructionSequence.load_from_binary(File.binread(x.yarb)).disasm`.
 
 ## 6. Referências
 
