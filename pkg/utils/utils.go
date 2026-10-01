@@ -500,6 +500,32 @@ func GetMessageType(waMsg *waE2E.Message) string {
 		return "placeholder"
 	case waMsg.SenderKeyDistributionMessage != nil, waMsg.StickerSyncRmrMessage != nil:
 		return "ignore"
+	// Wrappers: o conteúdo real fica em Message.Message dentro do FutureProofMessage.
+	// O whatsmeow (events.Message.UnwrapRaw) desembrulha parte deles antes do evento
+	// chegar aqui, mas os wrappers novos — como o botForwardedMessage, usado quando
+	// alguém encaminha uma localização — chegam embrulhados e caíam no "unknown".
+	case waMsg.BotForwardedMessage != nil:
+		return "forwarded"
+	case waMsg.SpoilerMessage != nil:
+		return "spoiler"
+	case waMsg.ViewOnceMessage != nil, waMsg.ViewOnceMessageV2 != nil, waMsg.ViewOnceMessageV2Extension != nil:
+		return "view once"
+	case waMsg.EphemeralMessage != nil:
+		return "ephemeral"
+	case waMsg.DocumentWithCaptionMessage != nil:
+		return "document with caption"
+	case waMsg.LottieStickerMessage != nil:
+		return "lottie sticker"
+	case waMsg.EditedMessage != nil:
+		return "edit"
+	case waMsg.AssociatedChildMessage != nil:
+		return "associated child"
+	case waMsg.LimitSharingMessage != nil:
+		return "limit sharing"
+	case waMsg.QuestionMessage != nil, waMsg.QuestionReplyMessage != nil:
+		return "question"
+	case waMsg.NewsletterAdminProfileMessage != nil, waMsg.NewsletterAdminProfileMessageV2 != nil:
+		return "newsletter admin profile"
 	default:
 		return "unknown"
 	}

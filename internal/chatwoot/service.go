@@ -229,10 +229,21 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 		msgType = "outgoing"
 	}
 
-	content := extractMessageContent(evt, waClient)
+	// Desembrulha a mensagem uma única vez: o mesmo msg é usado para o texto, a
+	// mídia, a resposta citada e a revogação. Wrappers de "encaminhada" (ex.:
+	// botForwardedMessage) marcam o balloon com o prefixo "↪".
+	msg, isForwarded := unwrapMessageContent(evt.Message)
+	if msg == nil {
+		return nil
+	}
+
+	content := extractMessageContentFrom(msg, waClient)
 	isEdit := evt.IsEdit || evt.Info.Edit == "1"
 	if isEdit && !strings.HasPrefix(content, "[Editado]") {
 		content = "[Editado] " + content
+	}
+	if isForwarded {
+		content = "↪ " + content
 	}
 	if isGroup && !evt.Info.IsFromMe {
 		senderName := evt.Info.PushName
@@ -253,23 +264,6 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	if isFromMe {
 		content = mirrorDeviceTitle + content
 		AddToEchoCache(convID, content)
-	}
-
-	msg := evt.Message
-	if msg == nil {
-		return nil
-	}
-	if msg.ViewOnceMessage != nil {
-		msg = msg.ViewOnceMessage.Message
-	}
-	if msg.ViewOnceMessageV2 != nil {
-		msg = msg.ViewOnceMessageV2.Message
-	}
-	if msg.EphemeralMessage != nil {
-		msg = msg.EphemeralMessage.Message
-	}
-	if msg.DeviceSentMessage != nil {
-		msg = msg.DeviceSentMessage.Message
 	}
 
 	deletedTargetMsgID := ""
@@ -587,6 +581,12 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 			}
 		}
 		
+		// Reaplica o prefixo de "encaminhada" caso os ramos de mídia tenham
+		// reconstruído o content (eles remontam o cabeçalho de grupo do zero).
+		if isForwarded && !strings.HasPrefix(content, "↪ ") {
+			content = "↪ " + content
+		}
+		
 		// Envio para o Chatwoot
 		if isMedia {
 			cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes, isFromMe)
@@ -816,22 +816,86 @@ func (s *Service) getAvatarURL(waClient *whatsmeow.Client, jid string) string {
 	return waURL
 }
 
-func extractMessageContent(evt *events.Message, waClient *whatsmeow.Client) string {
-	msg := evt.Message
+// maxMessageUnwrapDepth limita quantas camadas de wrapper são atravessadas ao
+// desembrulhar uma mensagem, evitando recursão infinita em aninhamentos inválidos.
+const maxMessageUnwrapDepth = 8
+
+// messageWrapper mapeia um campo do protobuf Message que embrulha outro Message.
+// No whatsmeow quase todos esses wrappers usam o tipo FutureProofMessage.
+type messageWrapper struct {
+	inner     func(*waE2E.Message) *waE2E.Message
+	forwarded bool // wrapper representa "mensagem encaminhada"
+}
+
+// messageWrappers lista os wrappers que a integração sabe desembrulhar.
+//
+// O whatsmeow (types/events.Message.UnwrapRaw) só desembrulha deviceSent, botInvoke,
+// ephemeral, viewOnce, viewOnceV2, viewOnceV2Extension, lottieSticker,
+// documentWithCaption e edited. Wrappers mais novos — como o botForwardedMessage,
+// usado quando alguém encaminha uma localização — continuam embrulhados; sem
+// desembrulhá-los o conteúdo cai no fallback "[Mensagem de tipo não identificado]".
+//
+// Wrappers de status/enquete (groupStatus, statusAddYours, pollCreationMessageV4,
+// botTask, pollCreationOptionImage...) ficam de fora de propósito para não
+// injetar tráfego de status no Chatwoot.
+var messageWrappers = []messageWrapper{
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDeviceSentMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2Extension().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEphemeralMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDocumentWithCaptionMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLottieStickerMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotInvokeMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetGroupMentionedMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetStatusMentionMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEventCoverImage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessageV2().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionReplyMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetAssociatedChildMessage().GetMessage() }},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLimitSharingMessage().GetMessage() }},
+	// Wrappers de "encaminhada": o balloon recebe o prefixo "↪" no Chatwoot.
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotForwardedMessage().GetMessage() }, forwarded: true},
+	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetSpoilerMessage().GetMessage() }, forwarded: true},
+}
+
+// innerMessage devolve a mensagem embrulhada pelo primeiro wrapper presente em msg,
+// ou nil quando msg já é a mensagem de conteúdo.
+func innerMessage(msg *waE2E.Message) (*waE2E.Message, bool) {
+	if msg == nil {
+		return nil, false
+	}
+	for _, w := range messageWrappers {
+		if inner := w.inner(msg); inner != nil {
+			return inner, w.forwarded
+		}
+	}
+	return nil, false
+}
+
+// unwrapMessageContent desce nos wrappers até a mensagem de conteúdo real e
+// informa se atravessou um wrapper de "encaminhada".
+func unwrapMessageContent(msg *waE2E.Message) (*waE2E.Message, bool) {
+	forwarded := false
+	for depth := 0; depth < maxMessageUnwrapDepth; depth++ {
+		inner, isForwarded := innerMessage(msg)
+		if inner == nil {
+			return msg, forwarded
+		}
+		msg = inner
+		if isForwarded {
+			forwarded = true
+		}
+	}
+	return msg, forwarded
+}
+
+// extractMessageContentFrom extrai o conteúdo de uma mensagem já desembrulhada.
+func extractMessageContentFrom(msg *waE2E.Message, waClient *whatsmeow.Client) string {
 	if msg == nil {
 		return ""
-	}
-	if msg.ViewOnceMessage != nil {
-		msg = msg.ViewOnceMessage.Message
-	}
-	if msg.ViewOnceMessageV2 != nil {
-		msg = msg.ViewOnceMessageV2.Message
-	}
-	if msg.EphemeralMessage != nil {
-		msg = msg.EphemeralMessage.Message
-	}
-	if msg.DeviceSentMessage != nil {
-		msg = msg.DeviceSentMessage.Message
 	}
 	if msg.ProtocolMessage != nil {
 		if msg.ProtocolMessage.EditedMessage != nil {
