@@ -230,34 +230,26 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	}
 
 	// Desembrulha a mensagem uma única vez: o mesmo msg é usado para o texto, a
-	// mídia, a resposta citada e a revogação. Wrappers de "encaminhada" (ex.:
-	// botForwardedMessage) marcam o balloon com o prefixo "↪".
+	// mídia, a resposta citada e a revogação. Uma mensagem é "encaminhada" quando
+	// veio no wrapper botForwardedMessage ou quando o WhatsApp marcou
+	// ContextInfo.isForwarded — é este último o sinal usado em encaminhadas comuns
+	// (localização, foto, texto), que não usam nenhum wrapper.
 	msg, isForwarded := unwrapMessageContent(evt.Message)
 	if msg == nil {
 		return nil
 	}
+	if isForwardedContext(msg) {
+		isForwarded = true
+	}
 
 	content := extractMessageContentFrom(msg, waClient)
 	isEdit := evt.IsEdit || evt.Info.Edit == "1"
-	if isEdit && !strings.HasPrefix(content, "[Editado]") {
-		content = "[Editado] " + content
-	}
-	if isForwarded {
-		content = "↪ " + content
-	}
-	if isGroup && !evt.Info.IsFromMe {
-		senderName := evt.Info.PushName
-		if senderName == "" {
-			senderName = evt.Info.Sender.User
-		}
 
-		// Tenta formatar o número do remetente
-		senderPhone := evt.Info.Sender.User
-		if strings.HasPrefix(senderPhone, "55") && len(senderPhone) >= 12 {
-			content = fmt.Sprintf("**%s - %s:**\n\n%s", senderPhone, senderName, content)
-		} else {
-			content = fmt.Sprintf("**%s:**\n\n%s", senderName, content)
-		}
+	// Aplica as decorações de texto. Os ramos de mídia remontam o content do
+	// zero mais abaixo, então applyDecorations é chamado de novo antes do envio.
+	content = applyDecorations(content, isEdit, isForwarded)
+	if header := senderHeader(evt, isGroup); header != "" {
+		content = header + content
 	}
 
 	isFromMe := evt.Info.IsFromMe
@@ -490,15 +482,7 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 			}
 		} else if loc := msg.GetLocationMessage(); loc != nil {
 			// Mensagem de Localização → Link do Google Maps
-			lat := loc.GetDegreesLatitude()
-			lng := loc.GetDegreesLongitude()
-			name := loc.GetName()
-			mapsURL := fmt.Sprintf("https://maps.google.com/maps?q=%.6f,%.6f", lat, lng)
-			if name != "" {
-				content = fmt.Sprintf("📍 *%s*\n%s", name, mapsURL)
-			} else {
-				content = fmt.Sprintf("📍 Localização\n%s", mapsURL)
-			}
+			content = senderHeader(evt, isGroup) + renderLocation(loc)
 		}
 	}
 
@@ -553,7 +537,7 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 				defer cancel()
 				ext := mimetypeToExt(mimeType)
 				storageName := fmt.Sprintf("%s/%s_%d%s", instance, evt.Info.ID, time.Now().Unix(), ext)
-				
+
 				fmt.Printf("[Chatwoot] Uploading %s to Minio for direct playback\n", mimeType)
 				s3URL, uploadErr := s.MediaStorage.Store(ctx, fileBytes, storageName, mimeType)
 				if uploadErr == nil {
@@ -580,20 +564,20 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 				}(fileBytes, fileName, mimeType)
 			}
 		}
-		
-		// Reaplica o prefixo de "encaminhada" caso os ramos de mídia tenham
-		// reconstruído o content (eles remontam o cabeçalho de grupo do zero).
-		if isForwarded && !strings.HasPrefix(content, "↪ ") {
-			content = "↪ " + content
-		}
-		
+
 		// Envio para o Chatwoot
 		if isMedia {
+			content = applyDecorations(content, isEdit, isForwarded)
 			cwMsgID, err = client.SendMessageWithAttachment(convID, content, msgType, externalID, fileBytes, fileName, mimeType, contentAttributes, isFromMe)
 		} else {
+			content = applyDecorations(content, isEdit, isForwarded)
 			cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, isFromMe, contentAttributes)
 		}
 	} else {
+		// Mídia sem download (localização não tem arquivo) ou texto puro: os
+		// ramos de mídia não passaram por aqui, mas a localização também monta o
+		// content do zero e precisa receber "[Editado]"/"↪" de volta.
+		content = applyDecorations(content, isEdit, isForwarded)
 		cwMsgID, err = client.SendMessage(convID, content, msgType, externalID, isFromMe, contentAttributes)
 	}
 
@@ -823,76 +807,181 @@ const maxMessageUnwrapDepth = 8
 // messageWrapper mapeia um campo do protobuf Message que embrulha outro Message.
 // No whatsmeow quase todos esses wrappers usam o tipo FutureProofMessage.
 type messageWrapper struct {
+	// name e o campo do protobuf, usado no log de diagnostico.
+	name string
+	// forwarded marca o wrapper que significa "mensagem encaminhada". Apenas o
+	// botForwardedMessage qualifies; os demais sao so transporte e nao recebem o
+	// prefixo "\u21aa" (o sinal real vem de isForwardedContext).
+	forwarded bool
 	inner     func(*waE2E.Message) *waE2E.Message
-	forwarded bool // wrapper representa "mensagem encaminhada"
 }
 
 // messageWrappers lista os wrappers que a integração sabe desembrulhar.
 //
 // O whatsmeow (types/events.Message.UnwrapRaw) só desembrulha deviceSent, botInvoke,
 // ephemeral, viewOnce, viewOnceV2, viewOnceV2Extension, lottieSticker,
-// documentWithCaption e edited. Wrappers mais novos — como o botForwardedMessage,
-// usado quando alguém encaminha uma localização — continuam embrulhados; sem
-// desembrulhá-los o conteúdo cai no fallback "[Mensagem de tipo não identificado]".
+// documentWithCaption e edited. Wrappers mais novos — como o botForwardedMessage —
+// continuam embrulhados; sem desembrulhá-los o conteúdo cai no fallback
+// "[Mensagem de tipo não identificado]".
 //
 // Wrappers de status/enquete (groupStatus, statusAddYours, pollCreationMessageV4,
 // botTask, pollCreationOptionImage...) ficam de fora de propósito para não
 // injetar tráfego de status no Chatwoot.
+//
+// Só o botForwardedMessage marca forwarded: os demais são apenas transporte, e
+// quem de fato identifica uma encaminhada é o ContextInfo.isForwarded da mensagem
+// de conteúdo (ver isForwardedContext). Em particular spoilerMessage é o wrapper
+// de conteúdo escondido do WhatsApp e não tem relação com encaminhamento.
 var messageWrappers = []messageWrapper{
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDeviceSentMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2Extension().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEphemeralMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDocumentWithCaptionMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLottieStickerMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotInvokeMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetGroupMentionedMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetStatusMentionMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEventCoverImage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessageV2().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionReplyMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetAssociatedChildMessage().GetMessage() }},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLimitSharingMessage().GetMessage() }},
-	// Wrappers de "encaminhada": o balloon recebe o prefixo "↪" no Chatwoot.
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotForwardedMessage().GetMessage() }, forwarded: true},
-	{inner: func(m *waE2E.Message) *waE2E.Message { return m.GetSpoilerMessage().GetMessage() }, forwarded: true},
+	{name: "deviceSentMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDeviceSentMessage().GetMessage() }},
+	{name: "viewOnceMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessage().GetMessage() }},
+	{name: "viewOnceMessageV2", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2().GetMessage() }},
+	{name: "viewOnceMessageV2Extension", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetViewOnceMessageV2Extension().GetMessage() }},
+	{name: "ephemeralMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEphemeralMessage().GetMessage() }},
+	{name: "documentWithCaptionMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetDocumentWithCaptionMessage().GetMessage() }},
+	{name: "lottieStickerMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLottieStickerMessage().GetMessage() }},
+	{name: "botInvokeMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotInvokeMessage().GetMessage() }},
+	{name: "groupMentionedMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetGroupMentionedMessage().GetMessage() }},
+	{name: "statusMentionMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetStatusMentionMessage().GetMessage() }},
+	{name: "eventCoverImage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetEventCoverImage().GetMessage() }},
+	{name: "newsletterAdminProfileMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessage().GetMessage() }},
+	{name: "newsletterAdminProfileMessageV2", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetNewsletterAdminProfileMessageV2().GetMessage() }},
+	{name: "questionMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionMessage().GetMessage() }},
+	{name: "questionReplyMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetQuestionReplyMessage().GetMessage() }},
+	{name: "associatedChildMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetAssociatedChildMessage().GetMessage() }},
+	{name: "limitSharingMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetLimitSharingMessage().GetMessage() }},
+	{name: "botForwardedMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetBotForwardedMessage().GetMessage() }, forwarded: true},
+	{name: "spoilerMessage", inner: func(m *waE2E.Message) *waE2E.Message { return m.GetSpoilerMessage().GetMessage() }},
 }
 
 // innerMessage devolve a mensagem embrulhada pelo primeiro wrapper presente em msg,
-// ou nil quando msg já é a mensagem de conteúdo.
-func innerMessage(msg *waE2E.Message) (*waE2E.Message, bool) {
+// ou nil quando msg ja e a mensagem de conteudo. Devolve tambem o nome do campo
+// que casou, para o log de diagnostico.
+func innerMessage(msg *waE2E.Message) (*waE2E.Message, string, bool) {
 	if msg == nil {
-		return nil, false
+		return nil, "", false
 	}
 	for _, w := range messageWrappers {
 		if inner := w.inner(msg); inner != nil {
-			return inner, w.forwarded
+			return inner, w.name, w.forwarded
 		}
 	}
-	return nil, false
+	return nil, "", false
 }
 
-// unwrapMessageContent desce nos wrappers até a mensagem de conteúdo real e
-// informa se atravessou um wrapper de "encaminhada".
+// unwrapMessageContent desce nos wrappers ate a mensagem de conteudo real e
+// informa se atravessou um wrapper de "encaminhada". Registra no log quais
+// wrappers foram atravessados, para diagnosticar wrappers novos do WhatsApp.
 func unwrapMessageContent(msg *waE2E.Message) (*waE2E.Message, bool) {
 	forwarded := false
+	traversed := ""
 	for depth := 0; depth < maxMessageUnwrapDepth; depth++ {
-		inner, isForwarded := innerMessage(msg)
+		inner, name, isForwarded := innerMessage(msg)
 		if inner == nil {
-			return msg, forwarded
+			break
 		}
 		msg = inner
 		if isForwarded {
 			forwarded = true
 		}
+		if traversed == "" {
+			traversed = name
+		} else {
+			traversed += ">" + name
+		}
+	}
+	if traversed != "" {
+		fmt.Printf("[Chatwoot] unwrap: wrapper=%s forwarded=%v ctxForwarded=%v\n",
+			traversed, forwarded, isForwardedContext(msg))
 	}
 	return msg, forwarded
 }
 
-// extractMessageContentFrom extrai o conteúdo de uma mensagem já desembrulhada.
+// messageContextInfo devolve o ContextInfo da mensagem de conteudo, olhando todos
+// os tipos que carregam um. Devolve nil quando a mensagem nao tem contexto.
+func messageContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	switch {
+	case msg.GetExtendedTextMessage() != nil:
+		return msg.GetExtendedTextMessage().GetContextInfo()
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetContextInfo()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetContextInfo()
+	case msg.GetAudioMessage() != nil:
+		return msg.GetAudioMessage().GetContextInfo()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetContextInfo()
+	case msg.GetStickerMessage() != nil:
+		return msg.GetStickerMessage().GetContextInfo()
+	case msg.GetLocationMessage() != nil:
+		return msg.GetLocationMessage().GetContextInfo()
+	case msg.GetContactMessage() != nil:
+		return msg.GetContactMessage().GetContextInfo()
+	}
+	return nil
+}
+
+// isForwardedContext informa se o WhatsApp marcou a mensagem como encaminhada.
+//
+// Este e o sinal confiavel: encaminhadas comuns (localizacao, foto, texto) nao
+// usam nenhum wrapper, apenas carregam ContextInfo.isForwarded = true. Por isso
+// os wrappers de transporte como spoilerMessage nao viram seta "\u21aa".
+func isForwardedContext(msg *waE2E.Message) bool {
+	return messageContextInfo(msg).GetIsForwarded()
+}
+
+// applyDecorations acrescenta os prefixos de edicao e de encaminhada.
+//
+// E idempotente de proposito: ela e chamada duas vezes no fluxo (logo apos extrair
+// o conteudo, e de novo antes do envio, porque os ramos de midia remontam o
+// content do zero). Primeiro remove os prefixos ja existentes, em qualquer ordem,
+// para nao duplicar quando um deles empurra o outro para fora da posicao 0.
+func applyDecorations(content string, isEdit, isForwarded bool) string {
+	content = strings.TrimPrefix(content, "↪ ")
+	content = strings.TrimPrefix(content, "[Editado] ")
+	content = strings.TrimPrefix(content, "↪ ")
+
+	if isEdit {
+		content = "[Editado] " + content
+	}
+	if isForwarded {
+		content = "↪ " + content
+	}
+	return content
+}
+
+// senderHeader devolve o cabecalho de grupo do remetente, no formato
+// "**telefone - Nome:**\n\n", ou string vazia fora de grupo / quando a mensagem
+// e nossa. Formata o telefone quando ele parece ser BR (55 + DDD + 9 digitos).
+func senderHeader(evt *events.Message, isGroup bool) string {
+	if evt == nil || !isGroup || evt.Info.IsFromMe {
+		return ""
+	}
+	name := evt.Info.PushName
+	if name == "" {
+		name = evt.Info.Sender.User
+	}
+	phone := evt.Info.Sender.User
+	if strings.HasPrefix(phone, "55") && len(phone) >= 12 {
+		return fmt.Sprintf("**%s - %s:**\n\n", phone, name)
+	}
+	return fmt.Sprintf("**%s:**\n\n", name)
+}
+
+// renderLocation monta o corpo de uma localizacao: rotulo + link do Google Maps.
+func renderLocation(loc *waE2E.LocationMessage) string {
+	mapsURL := fmt.Sprintf("https://maps.google.com/maps?q=%.6f,%.6f",
+		loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+	if name := loc.GetName(); name != "" {
+		return fmt.Sprintf("\U0001F4CD *%s*\n%s", name, mapsURL)
+	}
+	return fmt.Sprintf("\U0001F4CD Localiza\u00e7\u00e3o\n%s", mapsURL)
+}
+
+// extractMessageContentFrom extrai o conteudo de uma mensagem ja desembrulhada.
 func extractMessageContentFrom(msg *waE2E.Message, waClient *whatsmeow.Client) string {
 	if msg == nil {
 		return ""
@@ -948,7 +1037,7 @@ func resolveMentions(text string, ctxInfo *waE2E.ContextInfo, waClient *whatsmeo
 				}
 			}
 		}
-		
+
 		text = strings.ReplaceAll(text, "@"+rawNum, "@"+replacement)
 	}
 	return text
