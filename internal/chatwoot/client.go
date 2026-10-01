@@ -155,9 +155,12 @@ func (c *Client) searchContactDirect(query string) (*ContactLookup, error) {
 	return nil, nil
 }
 
-func (c *Client) CreateContact(name, identifier, phoneNumber, avatarURL string) (int, error) {
+func (c *Client) CreateContact(name, identifier, phoneNumber, avatarURL, sourceID string) (int, error) {
 	inboxIDInt, _ := strconv.Atoi(c.InboxID)
-	payload := ContactPayload{Name: name, Identifier: identifier, InboxID: inboxIDInt, PhoneNumber: phoneNumber}
+	// O source_id é enviado para o Chatwoot criar o contact_inbox já com o
+	// formato que a campanha em massa usa ao procurar a conversa. Sem ele o
+	// Chatwoot gera um UUID e o disparo não encontra o contact_inbox.
+	payload := ContactPayload{Name: name, Identifier: identifier, InboxID: inboxIDInt, PhoneNumber: phoneNumber, SourceID: sourceID}
 	data, err := c.doRequest("POST", "/contacts", payload)
 	if err != nil {
 		return 0, err

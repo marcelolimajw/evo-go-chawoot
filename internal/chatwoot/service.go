@@ -121,6 +121,9 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 		}
 	}
 	targetID := targetJID.String()
+	// source_id do contact_inbox: apenas os dígitos em conversa direta, para o
+	// disparo em massa reencontrar a conversa; JID completo em grupo/LID.
+	sourceID := chatwootSourceID(targetID, isGroup)
 
 	name := ""
 	if !evt.Info.IsFromMe {
@@ -184,7 +187,7 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	}
 
 	if contactID == 0 {
-		contactID, _ = client.CreateContact(name, targetID, phoneNumber, avatarURL)
+		contactID, _ = client.CreateContact(name, targetID, phoneNumber, avatarURL, sourceID)
 	} else {
 		updateData := map[string]interface{}{}
 
@@ -218,7 +221,7 @@ func (s *Service) HandleWhatsAppMessage(evt *events.Message, instance string, wa
 	convID, _ := client.GetConversations(contactID)
 	if convID == 0 {
 		inboxID, _ := strconv.Atoi(client.InboxID)
-		convID, _ = client.CreateConversation(contactID, inboxID, targetID)
+		convID, _ = client.CreateConversation(contactID, inboxID, sourceID)
 	}
 
 	msgType := "incoming"
@@ -675,6 +678,35 @@ func phoneNumberFromJID(jid string) string {
 		return user
 	}
 	return "+" + user
+}
+
+// chatwootSourceID deriva o source_id gravado no contact_inbox.
+//
+// A campanha em massa do Chatwoot resolve a conversa pelo source_id e, em inbox
+// Channel::Api, procura somente os dígitos do telefone. Por isso, em conversa
+// direta devolvemos apenas o número: assim o disparo encontra o contact_inbox já
+// existente e reabre a conversa em vez de criar outra.
+//
+// Grupo (@g.us) e LID (@lid) não possuem telefone, então precisam manter o JID
+// completo — é com ele que o webhook do canal casa a conversa.
+func chatwootSourceID(targetID string, isGroup bool) string {
+	if isGroup {
+		return targetID
+	}
+	sep := strings.Index(targetID, "@")
+	if sep < 0 || !strings.EqualFold(targetID[sep+1:], "s.whatsapp.net") {
+		return targetID
+	}
+	user := jidUserPart(targetID[:sep])
+	if user == "" {
+		return targetID
+	}
+	for _, r := range user {
+		if r < '0' || r > '9' {
+			return targetID
+		}
+	}
+	return user
 }
 
 func shouldUpdateContactName(contact *ContactLookup, targetID string) bool {

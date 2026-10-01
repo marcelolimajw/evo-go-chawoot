@@ -6,6 +6,7 @@ type ContactPayload struct {
 	Identifier  string `json:"identifier,omitempty"`
 	AvatarURL   string `json:"avatar_url,omitempty"`
 	InboxID     int    `json:"inbox_id,omitempty"`
+	SourceID    string `json:"source_id,omitempty"`
 }
 
 type ContactResponse struct {
