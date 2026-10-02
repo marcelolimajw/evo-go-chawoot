@@ -20,6 +20,7 @@ import (
 	"golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/gabriel-vasile/mimetype"
 	_ "github.com/lib/pq"
 	"github.com/patrickmn/go-cache"
 	"github.com/skip2/go-qrcode"
@@ -1360,18 +1361,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					}
 
 					if err == nil {
-						webpReader := bytes.NewReader(data)
-						img, err := webp.Decode(webpReader)
-						if err != nil {
-							mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to decode webp image (possibly animated): %v", mycli.userID, err)
-						} else {
-							var pngBuffer bytes.Buffer
-							err = png.Encode(&pngBuffer, img)
-							if err != nil {
-								mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to encode png image: %v", mycli.userID, err)
-							} else {
-								data = pngBuffer.Bytes()
-							}
+						media, convErr := convertStickerToPNG(data)
+						data = media.data
+						extension = media.extension
+						mimeType = media.mimeType
+						if convErr != nil {
+							mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Sticker PNG conversion failed (%v), sent as %s (%s)", mycli.userID, convErr, extension, mimeType)
 						}
 					}
 					// Handle associated child media messages
@@ -2161,6 +2156,42 @@ func (w whatsmeowService) ConnectOnStartup(clientName string) {
 			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error starting client: %s", clientName, err)
 		}
 	}
+}
+
+// stickerMedia traz os bytes da figurinha ja com a extensao e o mimetype
+// correspondentes ao conteudo real, para nunca subir arquivo rotulado errado.
+type stickerMedia struct {
+	data      []byte
+	extension string
+	mimeType  string
+	converted bool
+}
+
+// convertStickerToPNG converte a figurinha WebP do WhatsApp para PNG.
+//
+// O decodificador nao suporta WebP animado; quando a conversao falha os bytes
+// originais sao preservados e extensao/mimetype passam a refletir o formato real.
+// Sem isso o arquivo sobe rotulado como PNG contendo WebP e o preview quebra.
+func convertStickerToPNG(data []byte) (stickerMedia, error) {
+	if img, err := webp.Decode(bytes.NewReader(data)); err == nil {
+		var pngBuffer bytes.Buffer
+		if err := png.Encode(&pngBuffer, img); err == nil {
+			return stickerMedia{data: pngBuffer.Bytes(), extension: ".png", mimeType: "image/png", converted: true}, nil
+		} else {
+			return stickerMediaFromBytes(data), err
+		}
+	} else {
+		return stickerMediaFromBytes(data), err
+	}
+}
+
+// stickerMediaFromBytes rotula a midia pelo formato real dos bytes.
+func stickerMediaFromBytes(data []byte) stickerMedia {
+	realMime := mimetype.Detect(data).String()
+	if realExt := getExtensionFromMimeType(realMime); realExt != "" {
+		return stickerMedia{data: data, extension: realExt, mimeType: realMime}
+	}
+	return stickerMedia{data: data, extension: ".webp", mimeType: "image/webp"}
 }
 
 func getExtensionFromMimeType(mimeType string) string {
