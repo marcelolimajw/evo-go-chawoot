@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Global Echo Cache to prevent loops
@@ -927,25 +930,101 @@ func messageContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
 	return nil
 }
 
+// debugForward liga o log de diagnóstico do sinal de "encaminhada". Fica desligado
+// por padrão porque escreve várias linhas por mensagem; ligue com
+// CHATWOOT_DEBUG_FORWARD=1 ao investigar um tipo de conteúdo que não está
+// recebendo a seta, para ver o payload real que o WhatsApp mandou.
+var debugForward = os.Getenv("CHATWOOT_DEBUG_FORWARD") == "1"
+
 // logForwardDiagnostics imprime o estado do ContextInfo de cada mensagem recebida.
+//
 // O WhatsApp sinaliza "encaminhada" em campos diferentes conforme o tipo de
-// conteúdo, e o nome do campo varia entre versões; o log deixa visível qual sinal
-// chegou em cada caso, para não depender de suposição.
+// conteúdo e a versão do aplicativo, e o nome do campo varia (isForwarded,
+// forwardingScore, forwardOrigin, ...). Em vez de chutar um campo, o log imprime
+// TODOS os campos preenchidos da protobuf, para o sinal nunca depender de
+// suposição: quando a seta não aparece, o log mostra exatamente o que chegou.
 func logForwardDiagnostics(evt *events.Message, msg *waE2E.Message, isForwarded bool) {
+	if !debugForward {
+		return
+	}
 	kind := contentKind(msg)
 	ctx := messageContextInfo(msg)
-	fmt.Printf("[Chatwoot] fwd-diag: kind=%s seta=%v ctx=%v isForwarded=%v forwardingScore=%d stanzaID=%q participant=%q remoteJID=%q comment=%q\n",
-		kind,
-		isForwarded,
-		ctx != nil,
-		ctx.GetIsForwarded(),
-		ctx.GetForwardingScore(),
-		ctx.GetStanzaID(),
-		ctx.GetParticipant(),
-		ctx.GetRemoteJID(),
-		commentOf(msg),
-	)
+	fmt.Printf("[Chatwoot] fwd-diag: kind=%s seta=%v ctx=%v comment=%q\n",
+		kind, isForwarded, ctx != nil, commentOf(msg))
+	if ctx != nil {
+		fmt.Printf("[Chatwoot] fwd-diag-ctx: {%s}\n", dumpProtoPreenchido(ctx))
+	} else {
+		fmt.Printf("[Chatwoot] fwd-diag-ctx: <ausente>\n")
+	}
+	if loc := msg.GetLocationMessage(); loc != nil {
+		fmt.Printf("[Chatwoot] fwd-diag-loc: {%s}\n", dumpProtoPreenchido(loc))
+	}
+	fmt.Printf("[Chatwoot] fwd-diag-msg: {%s}\n", dumpCamposTopo(msg))
 	_ = evt
+}
+
+// dumpProtoPreenchido lista TODOS os campos preenchidos de uma mensagem
+// protobuf, com o valor. Como o ContextInfo tem mais de 60 campos e o WhatsApp
+// muda o campo usado para marcar "encaminhada" conforme o tipo de conteudo e a
+// versao do app, enumerar campos na mao erra: aqui o dump e generico e mostra
+// exatamente o que chegou, inclusive campo que ninguem pensou em olhar.
+func dumpProtoPreenchido(m proto.Message) string {
+	if m == nil {
+		return ""
+	}
+	r := m.ProtoReflect()
+	if !r.IsValid() {
+		return ""
+	}
+	campos := make([]string, 0, 8)
+	r.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		campos = append(campos, fmt.Sprintf("%s=%s", fd.Name(), dumpValorProto(fd, v)))
+		return true
+	})
+	return strings.Join(campos, " ")
+}
+
+// dumpCamposTopo lista os campos de primeiro nivel preenchidos da Message, para
+// revelar embrulho (wrapper) que o unwrap nao conhecesse.
+func dumpCamposTopo(msg *waE2E.Message) string {
+	if msg == nil {
+		return ""
+	}
+	return dumpProtoPreenchido(msg)
+}
+
+// dumpValorProto formata um valor protobuf de forma compacta e segura.
+func dumpValorProto(fd protoreflect.FieldDescriptor, v protoreflect.Value) string {
+	switch {
+	case fd.IsMap():
+		return fmt.Sprintf("mapa(%d)", v.Map().Len())
+	case fd.IsList():
+		l := v.List()
+		if fd.Kind() == protoreflect.MessageKind && l.Len() > 0 {
+			return fmt.Sprintf("lista(%d)[%s]", l.Len(), dumpProtoPreenchido(l.Get(0).Message().Interface()))
+		}
+		return fmt.Sprintf("lista(%d)", l.Len())
+	}
+	switch fd.Kind() {
+	case protoreflect.MessageKind, protoreflect.GroupKind:
+		return "presente"
+	case protoreflect.BytesKind:
+		return fmt.Sprintf("bytes(%d)", len(v.Bytes()))
+	case protoreflect.StringKind:
+		s := v.String()
+		if len(s) > 60 {
+			s = s[:60] + "..."
+		}
+		return strconv.Quote(s)
+	case protoreflect.EnumKind:
+		ev := fd.Enum().Values().ByNumber(v.Enum())
+		if ev != nil {
+			return fmt.Sprintf("%s(%d)", ev.Name(), v.Enum())
+		}
+		return strconv.Itoa(int(v.Enum()))
+	default:
+		return v.String()
+	}
 }
 
 // contentKind nomeia o tipo de conteúdo presente na mensagem, para o log.
@@ -1002,12 +1081,17 @@ func commentOf(msg *waE2E.Message) string {
 
 // isForwardedContext informa se o WhatsApp marcou a mensagem como encaminhada.
 //
-// Encaminhadas comuns (localizacao, foto, texto) nao usam nenhum wrapper: o sinal
-// esta no ContextInfo da mensagem de conteudo. O WhatsApp usa dois campos para
-// isso e nao sistematicamente o mesmo em todos os tipos de conteudo —
-// isForwarded (booleano) e forwardingScore (contador, > 0 quando a mensagem foi
-// encaminhada). So ler o booleano deixava a localizacao para fora da seta, porque
-// nela o WhatsApp preenche forwardingScore. Qualquer um dos dois marca a seta.
+// Encaminhadas comuns (foto, texto, video, audio, figurinha, contato) nao usam
+// nenhum wrapper: o sinal esta no ContextInfo da mensagem de conteudo, e o
+// WhatsApp preenche isForwarded (verificado em producao: chega com
+// isForwarded=true e forwardingScore=1 juntos). Os dois campos sao aceitos aqui.
+//
+// Localizacao e um caso a parte e NAO da para marcar: verificando o payload
+// bruto, uma localizacao encaminhada chega sem ContextInfo nenhum — a
+// LocationMessage so tem degreesLatitude, degreesLongitude e JPEGThumbnail, sem
+// qualquer campo de origem. Nao existe sinal no payload, logo nenhuma logica
+// consegue distinguir "localizacao encaminhada" de "localizacao enviada", e
+// marcar todas seria errado.
 //
 // Por isso os wrappers de transporte como spoilerMessage nao viram seta: eles
 // dizem apenas que a mensagem esta embrulhada, nao que foi encaminhada.
